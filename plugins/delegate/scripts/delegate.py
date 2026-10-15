@@ -33,6 +33,7 @@ from typing import Dict, List, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import brains as B  # noqa: E402
+import ratings as RT  # noqa: E402
 
 HOME =Path(os.environ.get("DELEGATE_HOME") or Path.home() / ".claude-delegate")
 JOBS = HOME / "jobs"
@@ -40,7 +41,8 @@ WORKTREES = HOME / "worktrees"
 IS_WIN = os.name == "nt"
 BRIEF_DIR = ".delegate"            # inside each worktree, git-excluded: TASK.md in, REPORT.md out
 DEFAULT_TIMEOUT = 3600
-DEFAULT_MAX_DIFF = 60000
+DEFAULT_MAX_DIFF = 60000   # what a second-opinion reviewer gets
+RESULT_DIFF = 0            # what result() returns by default: no diff (the director's tokens are the scarce ones)
 TAIL = 4000
 
 # Each CLI headless, in its own restricted mode. `work`: may edit files in its cwd (the worktree). `review`:
@@ -62,7 +64,9 @@ PROVIDERS: Dict[str, Dict] = {
             "review": ["agy-real", "--sandbox", "--mode", "plan", "-p"],
             "model_flag": "--model", "workdir_flag": "--add-dir", "author": ("agy", "agy@localhost"),
             "note": "Antigravity (Gemini); sandboxed, accept-edits mode"},
-    "opencode": {"work": ["opencode", "run"], "review": ["opencode", "run", "--agent", "plan"],
+    # --standalone: without it `opencode run` talks to the shared background service, which works in that
+    # service's folder, not the worktree (observed: it wrote into another repo's root).
+    "opencode": {"work": ["opencode", "run", "--standalone"], "review": ["opencode", "run", "--standalone", "--agent", "plan"],
                  "model_flag": "-m", "author": ("opencode", "opencode@localhost"),
                  "note": "opencode; uses its own configured permissions"},
 }
@@ -179,9 +183,26 @@ def refresh(job: Dict) -> Dict:
 
 def summary(job: Dict) -> Dict:
     keys = ("id", "kind", "cli", "model", "account", "title", "status", "round", "repo", "worktree", "branch", "base",
-            "started", "finished", "exit_code", "elapsed_sec", "error", "needs_login", "group", "parent")
+            "started", "agent_finished", "finished", "exit_code", "elapsed_sec", "agent_sec", "commit_sec", "error",
+            "needs_login", "group", "parent")
     out = {k: job[k] for k in keys if job.get(k) not in (None, "", [])}
-    tried = [a for a in job.get("attempts", []) if a.get("round") == job.get("round") and a.get("outcome") in ("auth", "unavailable")]
+    if job.get("check_result"):
+        c = job["check_result"]
+        out["check"] = "passed" if c["passed"] else "failed (exit %s) after %d automatic fix round(s)" % (
+            c["exit_code"], job.get("auto_used", 0))
+    if job.get("phase"):
+        out["phase"] = job["phase"]
+    if job.get("difficulty"):
+        out["difficulty"] = job["difficulty"]
+    if job.get("routing_notes"):
+        out["routing"] = job["routing_notes"]
+    if job.get("warnings"):
+        out["warnings"] = job["warnings"]
+    if job.get("escalations"):
+        out["escalated"] = ["%s -> %s (round %s)" % (e["from"], e["to"], e["round"]) for e in job["escalations"]]
+    if job.get("commit_error"):   # never only inside result(): a refused commit must show in status and wait
+        out["commit_error"] = job["commit_error"].strip().splitlines()[-1][:300] + " (see delegate_result)"
+    tried = [a for a in job.get("attempts", []) if a.get("round") == job.get("round") and a.get("outcome") in ("auth", "unavailable", "blocked")]
     if tried:   # brains this round skipped past (quota / sign-in)
         out["fell_back_from"] = ["%s (%s until %s)" % (a["brain"], a["outcome"], a.get("rested_until", "?")) for a in tried]
     return out
@@ -242,7 +263,7 @@ def work_brief(job: Dict, task: str, feedback: List[str], handover: str = "") ->
     rounds = note + "".join("\n\n## Rework round %d — reviewer feedback (address every point)\n\n%s" % (i + 2, f)
                      for i, f in enumerate(feedback))
     if feedback:
-        rounds = ("\n\nThis is a rework round. Your earlier rounds are already committed on this branch: everything "
+        rounds = ("\n\nThis is a rework round. Your earlier rounds' changes are already in this worktree: everything "
                   "in `git diff %s` (the task's base commit) is this task's own work, not pre-existing code, and "
                   "the reviewer may ask you to undo any of it." % job["base"][:12]) + rounds
     return """# Delegated task: {title}
@@ -306,7 +327,8 @@ def clis() -> List[Dict]:
     out = []
     for name, spec in PROVIDERS.items():
         exe = shutil.which(spec["work"][0])
-        out.append({"cli": name, "installed": bool(exe), "path": exe or "", "note": spec.get("note", "")})
+        out.append({"cli": name, "installed": bool(exe), "enabled": name not in B.disabled(), "path": exe or "",
+                    "note": spec.get("note", "")})
     return out
 
 
@@ -331,11 +353,14 @@ def installed(cli: str) -> bool:
     return cli in PROVIDERS and bool(shutil.which(PROVIDERS[cli]["work"][0]))
 
 
-def make_chain(cli: str = "", model: str = "", chain: Optional[List[str]] = None, fallback: bool = True) -> List[Dict]:
-    """The brains a job may use, in order: an explicit chain of 'cli[:model][@account]', else the default chain for
-    `cli` (its models x accounts, then its fallback CLIs' models x accounts when `fallback`; see brains.py)."""
+def make_chain(cli: str = "", model: str = "", chain: Optional[List[str]] = None, fallback: bool = True,
+               difficulty: str = "") -> List[Dict]:
+    """The brains a job may use, in order: an explicit chain of 'cli[:model][@account]'; else, when `cli` is given,
+    its models x accounts then its fallback CLIs'; else the difficulty tier (brains.json `tiers`)."""
     if chain:
         brains = [B.parse(s) for s in chain]
+    elif not cli:
+        brains = B.tier_chain(difficulty or B.config().get("default_difficulty") or "normal", installed)
     else:
         if cli not in PROVIDERS:
             raise ValueError("unknown cli %r; choose from %s" % (cli, ", ".join(PROVIDERS)))
@@ -343,6 +368,9 @@ def make_chain(cli: str = "", model: str = "", chain: Optional[List[str]] = None
     bad = sorted({b["cli"] for b in brains if b["cli"] not in PROVIDERS})
     if bad:
         raise ValueError("unknown cli in chain: %s" % ", ".join(bad))
+    off = sorted({b["cli"] for b in brains} & B.disabled())
+    if off:
+        raise ValueError("%s disabled (brains.json `disabled`); remove it there to use it" % ", ".join(off))
     brains = [b for b in brains if installed(b["cli"])]
     if not brains:
         raise RuntimeError("none of the chain's CLIs is installed")
@@ -351,10 +379,14 @@ def make_chain(cli: str = "", model: str = "", chain: Optional[List[str]] = None
 
 def start(cli: str, task: str, repo: str = ".", title: str = "", model: str = "", base: str = "",
           timeout: int = DEFAULT_TIMEOUT, group: str = "", chain: Optional[List[str]] = None,
-          fallback: bool = True) -> Dict:
+          fallback: bool = True, check: str = "", auto_fix: int = 2, difficulty: str = "") -> Dict:
     if not task.strip():
         raise ValueError("task brief is empty")
-    brains = make_chain(cli, model, chain, fallback)
+    difficulty = difficulty or B.config().get("default_difficulty") or "normal"
+    brains = make_chain(cli, model, chain, fallback, difficulty)
+    notes: List[str] = []
+    if not cli and not chain:   # the tier's order, minus brains the ratings show are weak at this difficulty
+        brains, notes = RT.route(brains, difficulty)
     first = brains[0]
     root = Path(git(Path(repo).resolve(), "rev-parse", "--show-toplevel"))
     base_sha = git(root, "rev-parse", base or "HEAD")
@@ -367,7 +399,9 @@ def start(cli: str, task: str, repo: str = ".", title: str = "", model: str = ""
            "title": title or task.strip().splitlines()[0][:80], "status": "starting", "round": 1, "repo": str(root),
            "worktree": str(wt), "branch": branch, "base": base_sha,
            "base_ref": git(root, "rev-parse", "--abbrev-ref", "HEAD"), "timeout": int(timeout), "created": now(),
-           "group": group, "feedback": [], "chain": brains, "attempts": []}
+           "group": group, "feedback": [], "chain": brains, "attempts": [], "check": check.strip(),
+           "auto_fix": max(0, int(auto_fix)), "auto_used": 0, "chain_pos": 0,
+           "difficulty": difficulty, "routing_notes": notes}
     d = job_dir(jid)
     d.mkdir(parents=True, exist_ok=True)
     (d / "task.md").write_text(task, encoding="utf-8")
@@ -388,6 +422,7 @@ def launch(job: Dict) -> Dict:
     kw: Dict = {"creationflags": 0x00000200 | 0x08000000} if IS_WIN else {"start_new_session": True}
     job.update(status="running", started=now(), finished="", exit_code=None, error="", agent_pid=None)
     job.pop("needs_login", None)
+    job.pop("phase", None)
     save(job)
     with open(d / "runner.log", "ab") as log:
         p = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "_run", job["id"]], stdin=subprocess.DEVNULL,
@@ -402,8 +437,10 @@ def _spawn(jid: str, argv: List[str], cwd: Path, b: Dict, stem: str, timeout: in
     d = job_dir(jid)
     with open(d / ("stdout.%s.log" % stem), "wb") as out, open(d / ("stderr.%s.log" % stem), "wb") as err:
         kw = {"creationflags": 0x08000000} if IS_WIN else {"start_new_session": True}
+        # PWD too: opencode takes its project folder from $PWD, not the process cwd (observed: an inherited PWD
+        # made it work in the orchestrator's repo instead of the worktree)
         p = subprocess.Popen(argv, cwd=str(cwd), stdin=subprocess.DEVNULL, stdout=out, stderr=err,
-                             env=agent_env(b["cli"], b["account"]), **kw)
+                             env={**agent_env(b["cli"], b["account"]), "PWD": str(cwd)}, **kw)
         job = load(jid)
         job["agent_pid"] = p.pid
         save(job)
@@ -415,16 +452,87 @@ def _spawn(jid: str, argv: List[str], cwd: Path, b: Dict, stem: str, timeout: in
             return -1, "timed out after %ss" % timeout
 
 
+def run_check(job: Dict, command: str = "", timeout: int = 1800) -> Dict:
+    """Run an acceptance command (tests, lint, build) in the job's worktree. No model involved: exit code + tail."""
+    command = command or job.get("check", "")
+    t0 = time.time()
+    try:
+        p = subprocess.run(command, shell=True, cwd=job["worktree"], capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=timeout, env={**base_env(), "PWD": str(job["worktree"])}, stdin=subprocess.DEVNULL)
+        code, text = p.returncode, (p.stdout + "\n" + p.stderr).strip()
+    except subprocess.TimeoutExpired:
+        code, text = -1, "check timed out after %ss" % timeout
+    return {"command": command, "exit_code": code, "passed": code == 0, "sec": round(time.time() - t0, 1),
+            "tail": tail(text, 3000), "at": now()}
+
+
 def _run(jid: str) -> int:
-    """The background runner: one round of one job, down the job's chain of brains. A brain that is out (quota,
+    """The background runner. Runs a round; when the job has an acceptance `check`, runs it, and while it fails
+    and automatic fix rounds remain, sends the worker its output as a new round -- no director tokens spent."""
+    _round(jid)
+    while True:
+        job = load(jid)
+        if job["kind"] != "work" or job.get("status") != "done" or not job.get("check"):
+            return 0
+        job["phase"] = "checking"
+        save(job)
+        chk = run_check(job)
+        job = load(jid)
+        if job.get("status") != "done":     # cancelled meanwhile
+            return 0
+        job.pop("phase", None)
+        job["check_result"] = chk
+        job.setdefault("checks", []).append({k: chk[k] for k in ("exit_code", "sec", "at")} | {"round": job["round"]})
+        diff_, bk = job.get("difficulty", ""), job.get("brain_key", "")
+        if chk["passed"]:
+            save(job)
+            RT.record(bk, diff_, "passed", jid, auto_rounds=job.get("auto_used", 0), agent_sec=job.get("agent_sec"))
+            return 0
+        failed_note = ("Automatic acceptance check failed. Command: `%s` (exit %s). Make it pass without weakening or "
+                       "skipping the check. Output (tail):\n\n```\n%s\n```" % (chk["command"], chk["exit_code"], chk["tail"]))
+        if job.get("auto_used", 0) >= job.get("auto_fix", 0):
+            nxt = next_brain(job)
+            if nxt is None:                 # nobody stronger left: the director decides
+                save(job)
+                RT.record(bk, diff_, "failed_check", jid, auto_rounds=job.get("auto_used", 0))
+                return 0
+            RT.record(bk, diff_, "escalated", jid, auto_rounds=job.get("auto_used", 0))
+            job.setdefault("escalations", []).append({"from": job.get("brain_label", ""), "to": B.label(job["chain"][nxt]),
+                                                      "round": job["round"], "why": "check still failing"})
+            job.update(chain_pos=nxt, auto_used=0)
+            failed_note = ("The previous worker (%s) could not make the acceptance check pass; you take over its "
+                           "worktree. Keep what is right, fix or redo the rest. " % job.get("brain_label", "?")) + failed_note
+        else:
+            job["auto_used"] = job.get("auto_used", 0) + 1
+        job["feedback"] = job.get("feedback", []) + [failed_note]
+        job["round"] = job.get("round", 1) + 1
+        job.update(status="running", started=now(), finished="", exit_code=None, error="")
+        save(job)
+        _round(jid)
+
+
+def main_tree_state(job: Dict) -> set:
+    """`git status --porcelain` lines of the repo's main working tree (the operator's), to catch escaped writes."""
+    return set(git(Path(job["repo"]), "status", "--porcelain", check=False).splitlines())
+
+
+def next_brain(job: Dict) -> Optional[int]:
+    """Index of the first brain after the one that did this job's work, or None."""
+    pos = job.get("brain_pos", job.get("chain_pos", 0))
+    return pos + 1 if pos + 1 < len(job["chain"]) else None
+
+
+def _round(jid: str) -> int:
+    """One round of one job, down the job's chain of brains. A brain that is out (quota,
     limit, outage) or not signed in is rested for its quota group and the next one takes over the same worktree."""
     job = load(jid)
     d, t0, rnd, handover = job_dir(jid), time.time(), job.get("round", 1), ""
     work = job["kind"] == "work"
     cfg = B.config()
     try:
-        for b in job["chain"]:
-            if B.resting(b):
+        start_at = job.get("chain_pos", 0)
+        for pos, b in enumerate(job["chain"]):
+            if pos < start_at or B.resting(b):
                 continue
             if work:
                 cwd = Path(job["worktree"])
@@ -441,8 +549,17 @@ def _run(jid: str) -> int:
             stem = "r%d.a%d" % (rnd, len(job.get("attempts", [])) + 1)
             job.update(cli=b["cli"], model=b["model"], account=b["account"], log=stem, argv=argv[:-1] + ["<prompt>"])
             save(job)
+            t_agent = time.time()
+            outside_before = main_tree_state(job) if work else None
             code, error = _spawn(jid, argv, cwd, b, stem, job.get("timeout") or DEFAULT_TIMEOUT)
+            agent_sec = round(time.time() - t_agent, 1)
             job = load(jid)
+            if work:
+                outside = sorted(main_tree_state(job) - outside_before)
+                if outside:   # the worker (or someone else meanwhile) changed the operator's tree
+                    job.setdefault("warnings", []).append(
+                        "while %s ran, the main working tree changed outside the worktree: %s" % (B.label(b), ", ".join(outside[:10])))
+                    save(job)
             if job.get("status") == "cancelled":
                 return 0
             text = read(d / ("stdout.%s.log" % stem)) + "\n" + read(d / ("stderr.%s.log" % stem))
@@ -452,21 +569,43 @@ def _run(jid: str) -> int:
                 made = "VERDICT" in text
             outcome = "failed" if error else B.classify(code, text, made)
             attempt = {"round": rnd, "brain": B.label(b), "exit_code": code, "outcome": outcome, "log": stem,
-                       "at": now()}
-            if outcome in ("auth", "unavailable"):
-                until = B.rest(b, outcome, text[-3000:], cfg["auth_rest_sec"] if outcome == "auth" else None)
+                       "at": now(), "agent_sec": agent_sec}
+            if outcome in ("auth", "unavailable", "blocked"):
+                long_rest = outcome in ("auth", "blocked")
+                until = B.rest(b, outcome, text[-3000:], cfg["auth_rest_sec"] if long_rest else None)
                 attempt["rested_until"] = datetime.fromtimestamp(until).isoformat(timespec="minutes")
                 if outcome == "auth":
                     attempt["login"] = B.login_guide(b["cli"], b["account"])
+                if outcome == "blocked":
+                    attempt["permission"] = ("%s stopped at a tool its headless permission mode may not use. Allow "
+                                             "what it needs (see README: worker permissions) or leave it to the "
+                                             "next brain." % b["cli"])
                 job.setdefault("attempts", []).append(attempt)
                 save(job)
-                handover = "%s %s" % (B.label(b), "was not signed in" if outcome == "auth" else "ran out of quota")
+                if outcome == "blocked":
+                    RT.record(RT.key(b), job.get("difficulty", ""), "blocked", jid)
+                handover = "%s %s" % (B.label(b), {"auth": "was not signed in", "unavailable": "ran out of quota",
+                                                   "blocked": "was blocked by its permission mode"}[outcome])
                 continue
             job.setdefault("attempts", []).append(attempt)
-            job.update(exit_code=code, error=error)
+            if outcome == "failed" and work:
+                RT.record(RT.key(b), job.get("difficulty", ""), "failed", jid, agent_sec=agent_sec)
+            if outcome == "failed" and work and pos + 1 < len(job["chain"]):   # escalate instead of giving up
+                save(job)
+                handover = "%s failed (exit %s%s)" % (B.label(b), code, ", " + error if error else "")
+                continue
+            job.update(exit_code=code, error=error, agent_finished=now(), agent_sec=agent_sec, brain_pos=pos,
+                       brain_label=B.label(b), brain_key=RT.key(b))
             if work:
-                job["commit"] = commit_work(job)
+                t_commit = time.time()
+                if cfg.get("commit_rounds"):   # opt-in: a commit (and the repo's hooks) per round
+                    job["commit"] = commit_work(job)
+                else:                          # default: stage only; the repo's hooks run once, when it lands
+                    git(cwd, "add", "-A", check=False)
+                job["commit_sec"] = round(time.time() - t_commit, 1)
             job["status"] = "done" if outcome == "ok" else "failed"
+            if outcome == "ok" and work and job.get("check"):
+                job["phase"] = "checking"   # set in the same write as "done": wait/merge must not see a gap
             break
         else:
             job = load(jid)
@@ -527,36 +666,63 @@ def wait(ids: List[str], timeout: int = 600, any_: bool = False, poll: float = 5
     end = time.time() + timeout
     while True:
         states = [status(i) for i in ids]
-        done = [s for s in states if s["status"] not in ("running", "starting")]
+        done = [s for s in states if s["status"] not in ("running", "starting") and not s.get("phase")]
         if (any_ and done) or len(done) == len(states) or time.time() >= end:
-            return {"finished": len(done) == len(states), "jobs": states}
+            keep = ("id", "status", "cli", "model", "round", "agent_sec", "check", "escalated", "warnings", "error",
+                    "commit_error", "needs_login", "fell_back_from")
+            return {"finished": len(done) == len(states),
+                    "jobs": [{k: s_[k] for k in keep if k in s_} for s_ in states]}
         time.sleep(poll)
 
 
-def result(jid: str, max_diff: int = DEFAULT_MAX_DIFF) -> Dict:
+def result(jid: str, max_diff: int = RESULT_DIFF, paths: Optional[List[str]] = None) -> Dict:
+    """What the director needs to judge a job, lean by default: report, diffstat, commits, short log tails. The
+    diff itself only when asked: `paths` (only those files) and/or `max_diff` > 0 (chars). Read the worktree for
+    more context instead of pulling the whole diff."""
     job = refresh(load(jid))
     d, stem = job_dir(jid), job.get("log", "")
     res = summary(job)
-    res["stdout_tail"] = tail(read(d / ("stdout.%s.log" % stem)))
-    err = read(d / ("stderr.%s.log" % stem)).strip()
-    if err:
-        res["stderr_tail"] = tail(err, 2000)
+    out = read(d / ("stdout.%s.log" % stem))
     if job["kind"] == "review":
+        res["answer"] = tail(out, 8000)
         return res
     wt = Path(job["worktree"])
+    report = read(wt / BRIEF_DIR / "REPORT.md") if wt.exists() else ""
+    res["stdout_tail"] = tail(out, 600 if report else TAIL)
+    if job.get("status") in ("failed", "lost"):
+        err = read(d / ("stderr.%s.log" % stem)).strip()
+        if err:
+            res["stderr_tail"] = tail(err, 1500)
     if not wt.exists():
         return res
-    res["report"] = read(wt / BRIEF_DIR / "REPORT.md") or "(the worker wrote no REPORT.md)"
+    res["report"] = report or "(the worker wrote no REPORT.md)"
+    if job.get("check_result"):
+        c = job["check_result"]
+        res["check_result"] = {"command": c["command"], "passed": c["passed"], "exit_code": c["exit_code"],
+                               "sec": c["sec"], "tail": tail(c["tail"], 300 if c["passed"] else 1500)}
     rng = "%s..%s" % (job["base"], job["branch"])
     res["commits"] = git(wt, "log", "--format=%h %an: %s", rng, check=False)
     if job.get("commit_error"):
-        res["commit_error"] = job["commit_error"] + "\n(changes are staged in the worktree, not committed)"
+        res["commit_error"] = job["commit_error"]
     git(wt, "add", "-N", ".", check=False)   # so new files show in the diff below
-    res["diffstat"] = git(wt, "diff", "--stat", job["base"], check=False)
-    diff = git(wt, "diff", job["base"], check=False)       # base vs the worktree: committed and uncommitted
-    res["diff"] = diff if len(diff) <= max_diff else diff[:max_diff] + "\n...(diff truncated at %d chars; read files in %s)" % (max_diff, wt)
-    res["uncommitted"] = git(wt, "status", "--porcelain", check=False)
+    res["diffstat"] = git(wt, "diff", "--stat=120", job["base"], check=False)   # base vs the worktree
+    if paths or max_diff > 0:
+        diff = git(wt, "diff", job["base"], "--", *(paths or []), check=False)
+        limit = max_diff if max_diff > 0 else 20000
+        res["diff"] = diff if len(diff) <= limit else diff[:limit] + "\n...(diff truncated at %d chars; read files in %s)" % (limit, wt)
+    else:
+        res["diff"] = "(not included: pass paths=[...] for specific files or max_diff>0; or read files in the worktree)"
     return res
+
+
+def check(jid: str, command: str, timeout: int = 1800) -> Dict:
+    """Run a command in a finished job's worktree (tests, lint, build) and return only exit code and a short tail."""
+    job = refresh(load(jid))
+    if job["kind"] != "work" or job.get("status") in ("running", "starting") or not Path(job["worktree"]).exists():
+        raise RuntimeError("job %s is %s; check needs a finished work job with its worktree" % (jid, job.get("status")))
+    c = run_check(job, command, timeout)
+    c["tail"] = tail(c["tail"], 400 if c["passed"] else 2000)
+    return c
 
 
 def followup(jid: str, feedback: str, cli: str = "", model: str = "") -> Dict:
@@ -568,8 +734,14 @@ def followup(jid: str, feedback: str, cli: str = "", model: str = "") -> Dict:
         raise ValueError("feedback is empty")
     job["feedback"] = job.get("feedback", []) + [feedback.strip()]
     job["round"] = job.get("round", 1) + 1
-    if cli or model:   # a new chain led by this cli/model; otherwise the job's chain again (rested brains skipped)
+    job["auto_used"] = 0   # the director's round gets a fresh automatic-fix budget
+    if job.get("brain_key"):
+        RT.record(job["brain_key"], job.get("difficulty", ""), "rework", jid)
+    if cli or model:   # a new chain led by this cli/model
         job["chain"] = make_chain(cli or job["chain"][0]["cli"], model)
+        job["chain_pos"] = 0
+    else:              # the brain that did the work continues; stronger ones remain as fallback
+        job["chain_pos"] = job.get("brain_pos", job.get("chain_pos", 0))
     save(job)
     return launch(job)
 
@@ -581,14 +753,14 @@ def review(jid: str, cli: str, model: str = "", focus: str = "", timeout: int = 
     brains = make_chain(cli, model, chain)
     cli, model = brains[0]["cli"], brains[0]["model"]
     parent = refresh(load(jid))
-    res = result(jid, max_diff=150000)
+    res = result(jid, max_diff=150000)   # the reviewer's tokens, not the director's
     rid = new_id(cli) + "-review"
     job = {"id": rid, "kind": "review", "cli": cli, "model": model, "title": "review of " + parent["title"],
            "status": "starting", "round": 1, "parent": jid, "repo": parent["repo"], "timeout": int(timeout),
            "created": now(), "group": parent.get("group", ""), "chain": brains, "attempts": []}
     room = job_dir(rid) / "room"
     room.mkdir(parents=True, exist_ok=True)
-    (room / "REVIEW.md").write_text(review_brief(parent, res.get("diff", ""), res.get("report", ""), focus),
+    (room / "REVIEW.md").write_text(review_brief(parent, res["diff"], res.get("report", ""), focus),
                                     encoding="utf-8")
     save(job)
     return launch(job)
@@ -596,6 +768,7 @@ def review(jid: str, cli: str, model: str = "", focus: str = "", timeout: int = 
 
 def cancel(jid: str) -> Dict:
     job = load(jid)
+    job.pop("phase", None)
     job.update(status="cancelled", finished=now())
     save(job)
     for pid in (job.get("agent_pid"), job.get("runner_pid")):
@@ -614,46 +787,74 @@ def _remove_worktree(job: Dict, delete_branch: bool) -> None:
 
 
 def merge(jid: str, mode: str = "squash", message: str = "", keep: bool = False) -> Dict:
-    """Land the job's branch on the repo's checked-out branch. Refuses when that tree has tracked changes."""
+    """Land a finished job on the repo's checked-out branch, with the repo's commit hooks run once.
+
+    squash (default): the worktree's whole change (base -> worktree) is applied to the main tree and committed
+    there; nothing is committed in the worktree. ff / merge: the worktree's change is committed on the job branch
+    (hooks run there), then fast-forwarded / merged without a second commit-hook run. Refuses when the main tree
+    has uncommitted tracked changes."""
     job = refresh(load(jid))
-    if job["kind"] != "work" or job["status"] != "done":
-        raise RuntimeError("job %s is %s; only a finished work job can land" % (jid, job["status"]))
-    repo = Path(job["repo"])
+    if job["kind"] != "work" or job["status"] != "done" or job.get("phase"):
+        raise RuntimeError("job %s is %s%s; only a finished work job can land"
+                           % (jid, job["status"], " (%s)" % job["phase"] if job.get("phase") else ""))
+    repo, wt = Path(job["repo"]), Path(job["worktree"])
     if git(repo, "status", "--porcelain", "--untracked-files=no"):
         raise RuntimeError("the main working tree of %s has uncommitted changes; commit or stash them first" % repo)
-    if not git(repo, "log", "--oneline", "%s..%s" % (job["base"], job["branch"])):
-        raise RuntimeError("job %s has no commits to land%s" % (jid, "; its commit hook refused: " + job["commit_error"] if job.get("commit_error") else ""))
+    git(wt, "add", "-A")
+    if not git(wt, "diff", "--cached", "--stat", job["base"], check=False):
+        raise RuntimeError("job %s changed nothing; nothing to land" % jid)
     target = git(repo, "rev-parse", "--abbrev-ref", "HEAD")
     msg = message or "%s\n\nDelegated to %s (job %s)." % (job["title"], job["cli"], jid)
-    if mode == "ff":
-        p = run(["git", "merge", "--ff-only", job["branch"]], cwd=repo)
+    t0 = time.time()
+    if mode == "squash":
+        patch = job_dir(jid) / "land.patch"
+        patch.write_bytes(subprocess.run(["git", "diff", "--cached", "--binary", job["base"]], cwd=str(wt),
+                                         capture_output=True, check=True).stdout)
+        p = run(["git", "apply", "--index", str(patch)], cwd=repo)   # atomic: all or nothing
         if p.returncode != 0:
-            raise RuntimeError("fast-forward refused (%s moved since the job started); use mode=squash or merge.\n%s"
-                               % (target, (p.stderr or p.stdout).strip()))
-    elif mode == "merge":
-        p = run(["git", "merge", "--no-ff", "-m", msg, job["branch"]], cwd=repo)
-        if p.returncode != 0:
-            run(["git", "merge", "--abort"], cwd=repo)
-            raise RuntimeError("merge failed; aborted.\n" + (p.stdout + p.stderr).strip()[-2000:])
-    elif mode == "squash":
-        p = run(["git", "merge", "--squash", job["branch"]], cwd=repo)
-        if p.returncode != 0:
-            run(["git", "reset", "--merge"], cwd=repo)
-            raise RuntimeError("squash failed; reset.\n" + (p.stdout + p.stderr).strip()[-2000:])
-        p = run(["git", "commit", "-q", "-m", msg], cwd=repo)
-        if p.returncode != 0:   # e.g. a commit hook refused: leave the squash staged for the director to fix
-            raise RuntimeError("squash staged but commit failed (fix and commit by hand):\n" + (p.stdout + p.stderr).strip()[-2000:])
+            raise RuntimeError("the change does not apply to %s as it is now (it moved since the job started). "
+                               "Send a followup to rebase, or land with mode=merge.\n%s"
+                               % (target, (p.stderr or p.stdout).strip()[-2000:]))
+        p = run(["git", "commit", "-q", "-m", msg], cwd=repo, timeout=1800)
+        if p.returncode != 0:   # e.g. a commit hook refused: leave it staged in the main tree for the director
+            job["commit_error"] = tail((p.stdout + p.stderr).strip(), 3000)
+            save(job)
+            raise RuntimeError("change staged in the main tree but its commit failed (fix, then commit by hand):\n"
+                               + (p.stdout + p.stderr).strip()[-2000:])
+    elif mode in ("ff", "merge"):
+        if git(wt, "status", "--porcelain", check=False):
+            commit_work(job)
+            if job.get("commit_error"):
+                save(job)
+                raise RuntimeError("committing the job branch failed (its commit hook refused):\n"
+                                   + job["commit_error"][-2000:])
+        if mode == "ff":
+            p = run(["git", "merge", "--ff-only", job["branch"]], cwd=repo)
+            if p.returncode != 0:
+                raise RuntimeError("fast-forward refused (%s moved since the job started); use mode=squash or merge.\n%s"
+                                   % (target, (p.stderr or p.stdout).strip()))
+        else:
+            p = run(["git", "merge", "--no-ff", "-m", msg, job["branch"]], cwd=repo, timeout=1800)
+            if p.returncode != 0:
+                run(["git", "merge", "--abort"], cwd=repo)
+                raise RuntimeError("merge failed; aborted.\n" + (p.stdout + p.stderr).strip()[-2000:])
     else:
         raise ValueError("mode must be squash, ff or merge")
-    job.update(status="merged", merged=now(), merged_into=target, merged_as=git(repo, "rev-parse", "HEAD"))
+    job.pop("commit_error", None)
+    if job.get("brain_key"):
+        RT.record(job["brain_key"], job.get("difficulty", ""), "accepted", jid)
+    job.update(status="merged", merged=now(), merged_into=target, merged_as=git(repo, "rev-parse", "HEAD"),
+               land_sec=round(time.time() - t0, 1))
     save(job)
     if not keep:
         _remove_worktree(job, delete_branch=True)
-    return {**summary(job), "merged_as": job["merged_as"], "merged_into": target}
+    return {**summary(job), "merged_as": job["merged_as"], "merged_into": target, "land_sec": job["land_sec"]}
 
 
 def discard(jid: str) -> Dict:
     job = load(jid)
+    if job.get("kind") == "work" and job.get("status") == "done" and job.get("brain_key"):
+        RT.record(job["brain_key"], job.get("difficulty", ""), "rejected", jid)
     if job.get("status") in ("running", "starting"):
         cancel(jid)
         job = load(jid)
@@ -667,7 +868,7 @@ def discard(jid: str) -> Dict:
 
 def auth(cli: str = "") -> List[Dict]:
     """Sign-in state of every account of every installed CLI (or one CLI), with the login command where missing."""
-    names = [cli] if cli else [c for c in PROVIDERS if installed(c)]
+    names = [cli] if cli else [c for c in PROVIDERS if installed(c) and c not in B.disabled()]
     env = base_env()
     out = []
     for c in names:
@@ -688,10 +889,11 @@ def login(cli: str, account: str = "default") -> Dict:
     return res
 
 
-def chain_view(cli: str, model: str = "", chain: Optional[List[str]] = None, fallback: bool = True) -> List[Dict]:
+def chain_view(cli: str = "", model: str = "", chain: Optional[List[str]] = None, fallback: bool = True,
+               difficulty: str = "") -> List[Dict]:
     """The brains a job started this way would try, in order, with any rest still on each."""
     out = []
-    for b in make_chain(cli, model, chain, fallback):
+    for b in make_chain(cli, model, chain, fallback, difficulty):
         r = B.resting(b)
         out.append({"brain": B.label(b), "quota_group": B.quota_group(b),
                     "resting_until": datetime.fromtimestamp(r["until"]).isoformat(timespec="minutes") if r else "",
@@ -713,7 +915,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("clis")
     s = sub.add_parser("start")
-    s.add_argument("--cli", required=True, help="one CLI, or several comma-separated (compete mode)")
+    s.add_argument("--cli", default="", help="one CLI, or several comma-separated (compete mode); default agy")
     s.add_argument("--repo", default=".")
     s.add_argument("--title", default="")
     s.add_argument("--task")
@@ -723,12 +925,22 @@ def main(argv: Optional[List[str]] = None) -> int:
     s.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT)
     s.add_argument("--chain", default="", help="explicit brains: cli[:model][@account],... (overrides --cli order)")
     s.add_argument("--no-fallback", action="store_true", help="only --cli's own models and accounts")
+    s.add_argument("--check", default="", help="acceptance command run in the worktree after each round")
+    s.add_argument("--difficulty", default="", choices=["", "easy", "normal", "hard"],
+                   help="pick the tier's brains (when no --cli/--chain): easy/normal start on free opencode")
+    s.add_argument("--auto-fix", type=int, default=2, help="automatic rounds when --check fails")
+    sub.add_parser("ratings", help="per brain and difficulty: score and history")
+    sub.add_parser("agy-switch", help="sign agy in with another Google account (OAuth link + pasted code)")
+    s = sub.add_parser("check")
+    s.add_argument("id")
+    s.add_argument("command")
     sub.add_parser("auth").add_argument("cli", nargs="?", default="")
     s = sub.add_parser("login")
     s.add_argument("cli")
     s.add_argument("account", nargs="?", default="default")
     s = sub.add_parser("chain")
-    s.add_argument("cli")
+    s.add_argument("cli", nargs="?", default="", help="omit to see a difficulty tier")
+    s.add_argument("--difficulty", default="")
     s.add_argument("--model", default="")
     s.add_argument("--no-fallback", action="store_true")
     s = sub.add_parser("limits")
@@ -743,7 +955,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     s.add_argument("--any", action="store_true")
     s = sub.add_parser("result")
     s.add_argument("id")
-    s.add_argument("--max-diff", type=int, default=DEFAULT_MAX_DIFF)
+    s.add_argument("--max-diff", type=int, default=RESULT_DIFF)
+    s.add_argument("--paths", default="", help="comma-separated files whose diff to include")
     s = sub.add_parser("followup")
     s.add_argument("id")
     s.add_argument("--feedback")
@@ -771,20 +984,28 @@ def main(argv: Optional[List[str]] = None) -> int:
         if a.cmd == "clis":
             out = clis()
         elif a.cmd == "start":
-            names = [c.strip() for c in a.cli.split(",") if c.strip()]
-            kw = dict(repo=a.repo, title=a.title, model=a.model, base=a.base, timeout=a.timeout)
+            names = [c.strip() for c in a.cli.split(",") if c.strip()] or [""]
+            kw = dict(repo=a.repo, title=a.title, model=a.model, base=a.base, timeout=a.timeout, check=a.check,
+                      auto_fix=a.auto_fix, difficulty=a.difficulty)
             if a.chain:
                 out = start(names[0], _text(a, "task"), chain=a.chain.split(","), **kw)
             elif len(names) == 1:
                 out = start(names[0], _text(a, "task"), fallback=not a.no_fallback, **kw)
             else:
                 out = start_many(names, _text(a, "task"), **kw)
+        elif a.cmd == "ratings":
+            out = RT.table()
+        elif a.cmd == "agy-switch":
+            import agy_login
+            return agy_login.interactive()
+        elif a.cmd == "check":
+            out = check(a.id, a.command)
         elif a.cmd == "auth":
             out = auth(a.cli)
         elif a.cmd == "login":
             out = login(a.cli, a.account)
         elif a.cmd == "chain":
-            out = chain_view(a.cli, a.model, None, not a.no_fallback)
+            out = chain_view(a.cli, a.model, None, not a.no_fallback, a.difficulty)
         elif a.cmd == "limits":
             out = {"cleared": B.clear_limits("" if a.clear == "*" else a.clear)} if a.clear else B.limits()
         elif a.cmd == "list":
@@ -794,7 +1015,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         elif a.cmd == "wait":
             out = wait(a.ids, a.timeout, a.any)
         elif a.cmd == "result":
-            out = result(a.id, a.max_diff)
+            out = result(a.id, a.max_diff, [x for x in a.paths.split(",") if x])
         elif a.cmd == "followup":
             out = followup(a.id, _text(a, "feedback"), a.cli, a.model)
         elif a.cmd == "review":

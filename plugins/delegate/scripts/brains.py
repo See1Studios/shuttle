@@ -41,16 +41,33 @@ LOGIN_ARGV = {"codex": ["codex", "login"], "claude": ["claude", "auth", "login"]
 LOGIN_HINT = {"codex": "browser sign-in to ChatGPT, or `codex login --with-api-key` with OPENAI_API_KEY on stdin",
               "claude": "browser sign-in; or run `claude setup-token` and put CLAUDE_CODE_OAUTH_TOKEN in the account's env.json",
               "grok": "browser sign-in (`grok login --device-auth` without a browser); or XAI_API_KEY in env.json",
-              "agy": "the first interactive run asks for Google sign-in; quit agy once it is signed in",
+              "agy": "use `delegate.py agy-switch` (or delegate_agy_switch): it opens agy's Google OAuth link and takes the pasted code",
               "opencode": "pick a provider and paste its key or sign in"}
 
 DEFAULTS = {
     "models": {"agy": ["gemini-3.8-flash-high", "claude-sonnet-5-5-high"]},
-    "fallback": {"codex": ["agy", "grok", "claude"], "claude": ["codex", "agy", "grok"],
-                 "grok": ["codex", "agy", "claude"], "agy": ["codex", "grok", "claude"],
-                 "opencode": ["codex", "agy", "grok"]},
+    # The point of delegating is to spend the workers' quota instead of the director's (Claude's), so the default
+    # worker is agy and `claude` is never a fallback: it runs only when asked for by name or in an explicit chain.
+    "default_cli": "agy",
+    # Cost order on this host: opencode free models < agy (paid, plentiful) < Claude (scarce; never automatic).
+    # A job without an explicit cli/chain starts at its difficulty tier's first brain; when a brain cannot make the
+    # job's check pass (after its automatic fix rounds) or fails outright, the next brain takes over the worktree.
+    "tiers": {
+        "easy":   ["opencode", "agy:gemini-3.8-flash-medium", "agy:gemini-3.8-flash-high"],
+        "normal": ["opencode", "agy:gemini-3.8-flash-high", "agy:claude-sonnet-5-5-high"],
+        "hard":   ["agy:claude-sonnet-5-5-high", "agy:gemini-3.8-flash-high"],
+    },
+    "default_difficulty": "normal",
+    # Implemented but not used: never in a default chain or fallback, not checked by `auth`, and refused when named.
+    # Remove a name here (in brains.json) to use that CLI. codex and grok: no subscription on this host.
+    "disabled": ["codex", "grok"],
+    # opencode needs no sign-in (free built-in models), so it is a fallback everywhere.
+    "fallback": {"agy": ["codex", "opencode", "grok"], "codex": ["agy", "opencode", "grok"],
+                 "grok": ["agy", "codex", "opencode"], "opencode": ["agy", "codex", "grok"],
+                 "claude": ["agy", "codex", "opencode", "grok"]},
     "order": "model-first",      # model-first: a model on every account before the next model; or account-first
-    "auth_rest_sec": 6 * 3600,   # a brain that is not signed in is skipped this long (or until `limits clear`)
+    "auth_rest_sec": 6 * 3600,
+    "commit_rounds": False,      # True: commit each round on the job branch (runs the repo's hooks every round)   # a brain that is not signed in is skipped this long (or until `limits clear`)
     # Paths a worker's tools write that must never be committed (added to the repo's .git/info/exclude).
     "exclude": ["/.delegate/", "graft/.cache/", "graft/.graph/"],
 }
@@ -64,6 +81,10 @@ AUTH_RE = re.compile(r"not (signed|logged) in|login required|please (log ?in|sig
                      r"unauthori[sz]ed|\b401\b|authenticat\w* (failed|required|error)|failed to authenticate|"
                      r"oauth (session|token)[^\n]{0,20}(expired|invalid|revoked)|invalid (api|x-api) key|"
                      r"credentials? (expired|not found|missing|invalid)|token (has )?expired", re.I)
+# A headless worker whose tool call needed a permission it could not ask for (agy: "no output produced -- a tool
+# required the "command" permission that headless mode cannot prompt for, so it was auto-denied"). It exits 0.
+BLOCKED_RE = re.compile(r"headless mode cannot prompt|was auto-denied|permission[^\n]{0,40}(denied|required)[^\n]{0,40}headless",
+                        re.I)
 RESET_IN_RE = re.compile(r"resets? in\s+(?:(\d+)\s*d)?\s*(?:(\d+)\s*h)?\s*(?:(\d+)\s*m)?\s*(?:(\d+)\s*s)?", re.I)
 UNKNOWN_REST = 900
 MAX_REST = 8 * 24 * 3600
@@ -85,6 +106,10 @@ def config() -> Dict:
     return cfg
 
 
+def disabled() -> set:
+    return set(config().get("disabled") or [])
+
+
 def label(b: Dict) -> str:
     return "%s:%s@%s" % (b["cli"], b.get("model") or "default", b.get("account") or "default")
 
@@ -98,13 +123,38 @@ def parse(spec: str) -> Dict:
             "account": account.strip() or "default"}
 
 
+AGY_LOG_DIR = USER_HOME / ".gemini" / "antigravity-cli" / "log"
+_AGY_AUTH_RE = re.compile(rb"authenticated successfully as (\S+@\S+)")
+
+
+def agy_email() -> str:
+    """The Google account agy is signed in with, from its newest CLI logs ("" when unknown)."""
+    try:
+        logs = sorted(AGY_LOG_DIR.glob("cli-*.log"), key=lambda p: p.stat().st_mtime, reverse=True)[:8]
+    except OSError:
+        return ""
+    for log in logs:
+        try:
+            with open(log, "rb") as f:
+                f.seek(max(0, log.stat().st_size - 400000))
+                found = _AGY_AUTH_RE.findall(f.read())
+        except OSError:
+            continue
+        if found:
+            return found[-1].decode("utf-8", "replace").strip(".,;'\"")
+    return ""
+
+
 def quota_group(b: Dict) -> str:
-    """The pool a quota hit empties: per account, and for agy per model family as well."""
-    group = "*"
+    """The pool a quota hit empties: per account, and for agy per model family as well. agy's single login can be
+    swapped to another Google account (agy_login.py), so its default account is keyed by the signed-in email."""
+    group, account = "*", b.get("account") or "default"
     if b["cli"] == "agy":
         m = (b.get("model") or "").lower()
         group = "gemini" if (not m or m.startswith("gemini")) else "claude-gpt"
-    return "%s@%s#%s" % (b["cli"], b.get("account") or "default", group)
+        if account == "default":
+            account = agy_email() or "default"
+    return "%s@%s#%s" % (b["cli"], account, group)
 
 
 # ------------------------------------------------------------------ accounts
@@ -142,7 +192,8 @@ def add_account(cli: str, name: str) -> Path:
     if cli == "agy" and IS_WIN:
         raise ValueError("agy keeps its login in the Windows credential store under one fixed name "
                          "(gemini:antigravity), whatever HOME is, so a second agy account cannot run side by side here. "
-                         "agy still falls back across its two quota groups (Gemini models, Claude/GPT models).")
+                         "Swap the signed-in Google account instead with `agy-switch` (OAuth link + pasted code); "
+                         "quota rests are kept per email.")
     d = ACCOUNTS / cli / name
     d.mkdir(parents=True, exist_ok=True)
     if cli == "agy":   # keep the operator's agy settings (permissions, MCP) in the new home
@@ -194,9 +245,12 @@ def auth_status(cli: str, account: str, base_env: Dict[str, str]) -> Dict:
         code, text = _probe(["agy-real", "models"], env, timeout=60)
         n = sum(1 for line in text.splitlines() if "\t" in line)
         out.update(logged_in=code == 0 and n > 0, detail=("%d models" % n) if n else text[-200:])
-    elif cli == "opencode":
-        code, text = _probe(["opencode", "auth", "list"], env)
-        out.update(logged_in=code == 0 and "no authenticated" not in text.lower(), detail=text.splitlines()[0] if text else "")
+    elif cli == "opencode":   # usable without any sign-in: it ships free models; signed-in providers add more
+        code, text = _probe(["opencode", "models"], env, timeout=60)
+        models = [line for line in text.splitlines() if "/" in line and " " not in line.strip()]
+        free = sum(1 for m in models if m.startswith("opencode/"))
+        out.update(logged_in=code == 0 and bool(models),
+                   detail="%d models (%d free built-in)" % (len(models), free) if models else text[-200:])
     if not out["logged_in"]:
         out["login"] = login_guide(cli, account)
     return out
@@ -245,7 +299,8 @@ def open_login(cli: str, account: str, base_env: Dict[str, str]) -> Dict:
 def chain_for(cli: str, model: str = "", fallback: bool = True, installed=None) -> List[Dict]:
     """The default chain for a job given its first CLI: that CLI's models x accounts, then the fallback CLIs'."""
     cfg = config()
-    clis = [cli] + ([c for c in cfg["fallback"].get(cli, []) if c != cli] if fallback else [])
+    off = set(cfg.get("disabled") or [])
+    clis = [cli] + ([c for c in cfg["fallback"].get(cli, []) if c != cli and c not in off] if fallback else [])
     out: List[Dict] = []
     for i, c in enumerate(clis):
         if installed and not installed(c):
@@ -255,6 +310,23 @@ def chain_for(cli: str, model: str = "", fallback: bool = True, installed=None) 
         pairs = ([(m, a) for m in models for a in accts] if cfg.get("order") != "account-first"
                  else [(m, a) for a in accts for m in models])
         out += [{"cli": c, "model": m, "account": a} for m, a in pairs]
+    return out
+
+
+def tier_chain(difficulty: str, installed=None) -> List[Dict]:
+    """The brains of a difficulty tier, each spread over that CLI's accounts, minus disabled / missing CLIs."""
+    cfg = config()
+    tiers = cfg.get("tiers") or {}
+    if difficulty not in tiers:
+        raise ValueError("difficulty must be one of %s" % ", ".join(tiers))
+    off = set(cfg.get("disabled") or [])
+    out: List[Dict] = []
+    for spec in tiers[difficulty]:
+        b = parse(spec)
+        if b["cli"] in off or (installed and not installed(b["cli"])):
+            continue
+        accts = [b["account"]] if "@" in spec else accounts(b["cli"])
+        out += [{"cli": b["cli"], "model": b["model"], "account": a} for a in accts]
     return out
 
 
@@ -314,9 +386,11 @@ def clear_limits(group: str = "") -> int:
 
 
 def classify(code: Optional[int], text: str, made_changes: bool) -> str:
-    """ok | auth | unavailable | failed. Only the tail of the output is read, and a run that exited 0 counts as a
-    quota hit only when it also produced nothing (a worker's own output may mention "rate limit")."""
+    """ok | blocked | auth | unavailable | failed. Only the tail of the output is read, and a run that exited 0 counts
+    as a quota hit only when it also produced nothing (a worker's own output may mention "rate limit")."""
     tail = (text or "")[-3000:]
+    if not made_changes and BLOCKED_RE.search(tail):
+        return "blocked"
     if code == 0 and (made_changes or not (AUTH_RE.search(tail) or UNAVAILABLE_RE.search(tail))):
         return "ok"
     if AUTH_RE.search(tail):

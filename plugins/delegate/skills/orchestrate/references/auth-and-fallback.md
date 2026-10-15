@@ -1,80 +1,76 @@
-# Sign-in and quota fallback
+# Sign-in, quota fallback, and agy account swaps
 
 ## Brains and chains
 
-A **brain** is `cli:model@account`. Every job runs down a **chain** of brains. When the running brain stops
-because of a quota / rate limit / outage, or because it is not signed in, the runner:
+A **brain** is `cli:model@account`. Every job runs down a **chain** of brains: a difficulty tier
+(`brains.json` `tiers`), or the chain led by a named `cli`. The runner moves to the next brain when the current one
 
-1. rests that brain's **quota group** until its reset (parsed from "resets in 2h5m"; 15 min when no time is given;
-   6 h for a missing sign-in),
-2. starts the next brain that is not resting **in the same worktree**, telling it that partial changes may be there.
-
-The result shows `fell_back_from` (which brains were skipped and why). A job fails with `needs_login` when every
-brain was out; give those login commands to the operator.
-
-Quota groups:
-
-| CLI | Quota group | Meaning |
+| stop | detected by | what happens |
 |---|---|---|
-| agy | `agy@<account>#gemini`, `agy@<account>#claude-gpt` | agy's limits are per model family: when Gemini models are spent, Claude/GPT models still work, and vice versa |
-| others | `<cli>@<account>#*` | one pool per account |
+| quota / rate limit / outage | "429", "usage limit", "resets in 2h5m", 5xx … | its quota group rests until the reset (15 min if none given) |
+| not signed in | "not logged in", "401", "OAuth … expired" … | rests 6 h; `needs_login` lists the login command |
+| blocked by its permission mode | "headless mode cannot prompt … auto-denied" (exit 0, nothing done) | rests 6 h; fix the permissions or let others do it |
+| failed (exit ≠ 0) | anything else | next brain takes over (no rest) |
+| check still failing after its automatic rounds | the job's `check` | **escalates** to the next brain (rated `escalated`) |
 
-Default chain for `delegate_start(cli="agy")`, with one account:
+The next brain continues in the same worktree and is told what the previous one left. Results show
+`fell_back_from` and `escalated`.
 
-```
-agy:gemini-3.8-flash-high@default   -> agy@default#gemini
-agy:claude-sonnet-5-5-high@default  -> agy@default#claude-gpt
-codex@default -> grok@default -> claude@default      (cross-CLI fallback)
-```
+Quota groups: one per account, except agy, whose limits are per model family **and per Google account**:
+`agy@<email>#gemini` and `agy@<email>#claude-gpt`. Swapping agy's account therefore frees its quota at once, and
+the old account's rests are remembered for when it comes back.
 
-With extra accounts the order is model-first: each model on every account before the next model. Check before a
-big fan-out with `delegate_chain(cli)`; see current rests with `delegate_limits()`.
+## Workers on this host
 
-Override per job with `chain=["agy:gemini-3.8-flash-high", "codex@work", "grok"]`, or turn cross-CLI fallback off
-with `fallback=false` (compete mode never crosses CLIs, so candidates stay distinct).
-
-## Accounts
-
-`default` is each CLI's normal login. Extra accounts live in `~/.claude-delegate/accounts/<cli>/<name>/`; the
-runner points the CLI there through its config-home variable, so they never disturb the operator's own login:
-
-| CLI | Variable | Login command (run by `delegate_login`) |
+| CLI | Sign-in | Notes |
 |---|---|---|
-| codex | `CODEX_HOME` | `codex login` |
-| claude | `CLAUDE_CONFIG_DIR` | `claude auth login`, or `claude setup-token` → `CLAUDE_CODE_OAUTH_TOKEN` in `env.json` |
-| grok | `GROK_HOME` | `grok login` (`--device-auth` without a browser), or `XAI_API_KEY` in `env.json` |
-| opencode | `XDG_DATA_HOME` | `opencode auth login` |
-| agy | — | Windows keeps agy's login in the credential store under one fixed name, so only the default account works; agy falls back across its two model groups instead |
+| opencode | none needed | free built-in models (`opencode models`); always run with `--standalone` so it works in the worktree |
+| agy | Google account (one at a time) | swap with `delegate_agy_switch` (below) |
+| claude | `claude auth login` | spends Claude quota; never automatic |
+| codex, grok | — | disabled (no subscription); implemented, enable in `brains.json` |
 
-`env.json` in an account folder adds environment variables for that account only (API keys, tokens). It holds
-secrets: it is the operator's file. Never read its values out loud or copy them anywhere.
+## Checking sign-in
 
-## The sign-in procedure (what you do)
+1. `delegate_auth()` — every enabled CLI and account with `logged_in`.
+2. For a missing login, give the operator the `login` command from the result, or offer
+   `delegate_login(cli, account)`, which opens the CLI's own sign-in in a new console window (ask first). You never
+   type or see credentials.
+3. Extra accounts (more quota) for claude / codex / grok / opencode: `delegate_login(cli, "<name>")` creates
+   `~/.claude-delegate/accounts/<cli>/<name>/` and points the CLI there (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`,
+   `GROK_HOME`, `XDG_DATA_HOME`). The account joins that CLI's chains. `env.json` there may hold an API key; it is
+   the operator's secret — never read it out.
 
-1. `delegate_auth()` — every installed CLI and account with `logged_in`.
-2. For each `logged_in: false` the operator wants to use: tell them the `login` command from the result, and offer
-   to open it: `delegate_login(cli, account)` opens a new console window running the CLI's own sign-in. **Ask
-   first**; the operator completes the browser / device-code step. You never type or see credentials.
-3. To add a second account of a CLI (more quota): `delegate_login(cli, "<name>")` creates the account folder and
-   opens its sign-in. It joins every default chain of that CLI automatically.
-4. After the operator says it is done, run `delegate_auth(cli)` again to confirm, and `delegate_limits(clear="<cli>@<account>")`
-   if an old rest for that account is still listed.
+## Swapping agy's Google account (when both agy quota groups are spent)
 
-The Claude desktop app's own session is not the `claude` CLI's login: a worker `claude` needs its own sign-in.
+agy keeps a single login in the Windows credential store, so accounts cannot run side by side; they are swapped
+through agy's own OAuth sign-in:
 
-## Configuration (operator-owned, optional)
+1. Ask the operator: the current agy account gets signed out.
+2. `delegate_agy_switch(confirm_logout=true)` drives agy in a pseudo console: `/logout`, Google OAuth, and returns
+   the sign-in `url` (plus `email_before`).
+3. Give the operator the link. They open it, sign in with the other Google account, and paste back the response
+   code the page shows.
+4. `delegate_agy_code(code)` types it into agy and returns the signed-in `email`. The code is used once and not
+   stored. Then `delegate_chain("normal")` shows agy available again.
 
-`~/.claude-delegate/brains.json`:
+Without Claude: `python delegate.py agy-switch` (prints the link, prompts for the code). Needs `pip install pywinpty`.
+
+## Configuration (operator-owned, optional): `~/.claude-delegate/brains.json`
 
 ```json
 {
-  "models":   { "agy": ["gemini-3.8-flash-high", "claude-sonnet-5-5-high"], "codex": [""] },
-  "fallback": { "codex": ["agy", "grok"], "agy": ["codex", "grok", "claude"] },
-  "order": "model-first",
+  "tiers": {
+    "easy":   ["opencode", "agy:gemini-3.8-flash-medium", "agy:gemini-3.8-flash-high"],
+    "normal": ["opencode", "agy:gemini-3.8-flash-high", "agy:claude-sonnet-5-5-high"],
+    "hard":   ["agy:claude-sonnet-5-5-high", "agy:gemini-3.8-flash-high"]
+  },
+  "disabled": ["codex", "grok"],
+  "ratings": { "min_events": 4, "min_score": 0.35, "explore": 0.15 },
   "auth_rest_sec": 21600,
-  "exclude": ["/.delegate/", "graft/.cache/", "graft/.graph/"]
+  "exclude": ["/.delegate/", "graft/.cache/", "graft/.graph/"],
+  "commit_rounds": false
 }
 ```
 
-`~/.claude-delegate/providers.json` changes a CLI's command line or adds a custom one (see the README). Worker
-permissions are widened only there, by the operator.
+`~/.claude-delegate/providers.json` changes a CLI's command line (e.g. permissions) or adds a custom CLI; see the
+README. Worker permissions are widened only there, by the operator.

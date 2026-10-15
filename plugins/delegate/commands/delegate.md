@@ -1,16 +1,16 @@
 ---
-description: Delegate a task to another agent CLI (codex, claude, grok, agy, opencode) in an isolated worktree, then review and land it
-argument-hint: "[cli|cli1,cli2|auto] <task description>"
+description: Delegate a task to cheaper agent CLIs (opencode free -> agy) routed by difficulty, then review lean and land it
+argument-hint: "[easy|normal|hard|<cli>] <task description>"
 ---
 
-Act as the director using the `orchestrate` skill (load it first).
+Act as the director using the `orchestrate` skill (load it first). Spend as few Claude tokens as possible.
 
 Request: $ARGUMENTS
 
-1. If the first word names a CLI (or a comma-separated list for compete mode), use it; if it is `auto` or absent,
-   choose per the skill's table after `delegate_clis`.
-2. Inspect the repository enough to write a complete brief (goal, context with paths, do, don't, done when).
-   If the request is ambiguous in a way that changes the result, ask the user before starting.
-3. Start the job(s) on the current repository, tell the user the job ids in one line, wait, then review per the
-   skill's checklist (run the tests yourself in the worktree).
-4. Send rework if needed. When it is ready, ask the user before landing unless they already said to land.
+1. If the first word is `easy`, `normal` or `hard`, use it as the difficulty; if it names a CLI, force that worker.
+   Otherwise judge the difficulty yourself (skill section 2; `delegate_ratings` if unsure).
+2. Find the exact files cheaply and write a precise brief (Goal / Files / Do / Don't / Done when) and an acceptance
+   `check` command. Ask the operator only if an ambiguity would change the result.
+3. Start the job(s) on the current repository, tell the operator the job ids in one line, wait with
+   `delegate_wait`, then review in tiers (machine verdict -> shape -> worker second opinion -> targeted read).
+4. Rework or land; ask before landing unless the operator already said to land.

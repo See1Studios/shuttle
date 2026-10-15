@@ -1,118 +1,107 @@
 ---
 name: orchestrate
-description: Director mode — delegate coding work to other agent CLIs (codex, claude, grok, agy/Gemini, opencode) running headless in isolated git worktrees, with automatic fallback across models, accounts and CLIs when a quota runs out, then review their diffs, send rework, and land the result. Also covers signing the worker CLIs in. Use when the user asks to delegate, outsource, farm out, fan out, or "have codex/grok/gemini do it", to run several agents in parallel or have them compete, to get a second-opinion review from another model, or when a task is large and splits into independent pieces. Also use to check on, review, merge, or discard existing delegation jobs.
+description: Director mode for saving Claude tokens — hand implementation work to cheaper agent CLIs (opencode's free models first, then agy/Gemini, then agy's Claude group; codex, grok and the claude CLI only when enabled or named) running headless in isolated git worktrees, routed by task difficulty and by each model's track record, with an automatic test-retry-escalate loop, so Claude spends tokens only on the brief and the final judgment. Use when the user asks to delegate, outsource, farm out, fan out, or "have opencode/agy/gemini do it", wants to save Claude tokens or quota, wants parallel or competing agents, or a second-opinion review from another model; also to check, review, merge or discard delegation jobs, read worker ratings, sign workers in, or swap agy's Google account.
 ---
 
-# Orchestrate: delegate, review, land
+# Orchestrate: spend the cheapest tokens that can do the job
 
-You are the **director**. Workers write code; you own the plan, the briefs, the review, and the decision to land.
-Workers are other agent CLIs started by the `delegate` MCP tools (`delegate_*`). Each job gets its own git worktree
-and branch `delegate/<id>`, so nothing touches the user's working tree until you merge.
+Cost order on this host: **opencode free models < agy (paid, plentiful) < Claude (scarce)**. You (Claude) write the
+brief and make the final call; writing code, running tests, retrying and first-pass review belong to the workers and
+the runner. Every tool result you read costs tokens: ask for the smallest answer that lets you decide.
 
-## 1. Decide what to delegate
+Tools are `delegate_*` (MCP). Each job gets its own git worktree and branch `delegate/<id>`; nothing touches the
+operator's tree until you merge.
 
-- Delegate work that is **well specified and checkable**: an implementation with clear acceptance criteria, a
-  refactor with tests, a port, test writing, a bug fix with a reproduction. Split large work into pieces that touch
-  **disjoint files** so they can run in parallel and merge cleanly.
-- Keep for yourself: architecture decisions, ambiguous requirements (ask the user first), tiny edits (faster to do
-  than to brief), and anything that needs this conversation's context the brief cannot carry.
-- If the repo has its own delegation pipeline or landing rules (e.g. an `AGENTS.md` that requires tickets, path
-  claims or a specific runner), those rules win: follow them, and use this plugin only where they allow.
+## 1. Delegate by default
 
-## 2. Pick the worker
+- Delegate every task that is **specified and checkable**: features with acceptance tests, bug fixes with a
+  reproduction, refactors under tests, ports, test writing, docs, plumbing. Split big work into pieces touching
+  **disjoint files** and run them in parallel — small pieces also let the free tier take more of them.
+- Keep only: design decisions, ambiguity you must settle with the operator, and edits shorter than their brief.
+- The repo's own rules (an `AGENTS.md` requiring tickets, path claims, its own runner) win; follow them.
 
-Call `delegate_clis` once per session to see what is installed. Rough strengths (adjust to what you observe):
+## 2. Route by difficulty — the runner picks the worker
 
-| CLI | Use for | Default permissions |
+Leave `cli` empty and set `difficulty`; the tier decides who starts and who takes over:
+
+| difficulty | use for | chain (cheapest first) |
 |---|---|---|
-| `codex` | solid implementation + running tests | workspace-write sandbox, shell allowed inside it |
-| `claude` | careful edits, docs, refactors needing judgment | file edits only, no shell |
-| `grok` | fast implementation, second opinions | accept-edits |
-| `agy` | Gemini (or Claude via its 2nd quota group): large-context reading, broad changes | sandboxed, accept-edits; shell commands auto-denied headless |
-| `opencode` | any provider the user configured in opencode | opencode's own config |
+| `easy` | mechanical edits, renames, docs, simple tests, single-file changes with a clear check | opencode → agy Gemini (medium) → agy Gemini (high) |
+| `normal` (default) | typical feature/bug work in a few files with tests | opencode → agy Gemini → agy Claude group |
+| `hard` | cross-module design, subtle concurrency/security, unclear failure modes | agy Claude group → agy Gemini |
 
-Prefer a worker that can run the tests (codex) when the task depends on them. For a second-opinion review, pick a
-**different model family** from the worker. Permissions are set by the operator in `~/.claude-delegate/providers.json`;
-never edit that file to widen a worker's permissions yourself — ask the user.
+When a worker cannot make `check` pass after its automatic fix rounds, or fails outright, the next brain takes over
+the same worktree — no tokens of yours spent. Quota, sign-in and permission stops fall through the same chain.
+`delegate_chain(difficulty)` shows the current chain and rests.
 
-## 3. Write the brief
+**Ratings steer it.** Every outcome is scored per model and difficulty (`delegate_ratings`): passed (fewer
+automatic rounds = higher), escalated, failed, and your verdicts — accepted (merge), rework (followup), rejected
+(discard). A model proven weak at a difficulty is skipped there (with occasional re-tries so it can recover). So:
+rate honestly — merge what you accept, `discard` what you reject — and check `delegate_ratings` now and then to
+re-label work: if opencode passes most `normal` jobs, mark more of your tasks `easy`/`normal`; if it keeps
+escalating on a kind of task, call that kind `hard` from the start.
 
-The `task` you pass is everything the worker knows. It does not see this conversation. Use this shape:
+Name `cli` only to force a worker. `claude` spends Claude quota and is never automatic. `codex` and `grok` are
+disabled on this host (no subscription; remove them from `disabled` in `~/.claude-delegate/brains.json` to use).
+
+## 3. The brief — where your tokens buy the most
+
+Weaker workers need precision, not volume. Find the exact files and symbols cheaply (code index, not whole-file
+reads), then write:
 
 ```
-Goal: <one sentence, the outcome>
-Context: <why; relevant files and symbols with paths; how the code is organised there>
-Do: <numbered concrete steps or requirements>
-Don't: <out of scope; files not to touch; behaviours to keep>
-Done when: <acceptance criteria: tests that must pass, commands to run, observable behaviour>
+Goal: <one sentence>
+Files: <exact paths to change; paths to read for context; nothing else>
+Do: <numbered, concrete steps; name functions, signatures, data shapes>
+Don't: <files/behaviour to leave alone>
+Done when: <the check command passes; observable behaviour>
 ```
 
-The runner wraps it with standing rules (stay in the worktree, don't commit or push, follow the repo's AGENTS.md,
-write `.delegate/REPORT.md`). Write the brief in English unless the code base is in another language.
+**Always pass `check`**: the acceptance command the runner runs after each round (e.g.
+`py -3 -m pytest -q tests/test_x.py`, a build, a lint). A testable task without a `check` costs you a review the
+machine could have done, and gives the ratings nothing to learn from. No test yet? Make writing one step 1 and point
+the check at it. `auto_fix_rounds` (default 2) is per worker before it escalates.
 
-## 4. Sign-in check
+## 4. Run and wait cheaply
 
-Once per session, before the first delegation: `delegate_auth()`. For any CLI you plan to use that shows
-`logged_in: false`, give the operator its `login` command and offer `delegate_login(cli, account)` (opens the
-CLI's own sign-in window; ask first; never handle credentials). Details, extra accounts for more quota, and the
-agy model-group quotas: `references/auth-and-fallback.md`.
+- `delegate_start(task, repo, difficulty=..., check=..., title=...)`; one call per parallel piece.
+  `delegate_compete` only when the choice really matters: it doubles what you review.
+- One line to the operator with the job ids, then `delegate_wait(ids, timeout_sec=600)` (compact states). Don't
+  poll `delegate_status` in between; don't narrate waits.
+- Once per session before the first job, or when a job reports `needs_login`: `delegate_auth()`; see
+  `references/auth-and-fallback.md` (sign-in, extra accounts, swapping agy's Google account).
+- A `warnings` entry about the main working tree changing while a worker ran means a possible escaped write:
+  look at the operator's `git status` before anything else and tell them.
 
-## 5. Run
+## 5. Review in tiers — stop at the first tier that decides
 
-- One task: `delegate_start(cli, task, repo, title)`. Parallel pieces: one `delegate_start` per piece.
-  Same task to several workers to pick the best: `delegate_compete(clis, task, repo)`.
-- Quotas are handled by the runner: a brain that hits a limit or is not signed in is rested and the next one in
-  the job's chain continues in the same worktree (same CLI's other models/accounts, then other CLIs). Check the
-  order with `delegate_chain(cli)`; pin it with `chain=[...]` or keep one CLI with `fallback=false`.
-- Tell the user in one line what went to whom (job ids), then wait with `delegate_wait(ids, timeout_sec=600)`;
-  repeat while `finished` is false. Do useful work meanwhile if there is any (e.g. brief the next piece).
-- Read `fell_back_from` in the result: tell the user which brain actually did the work, and review a fallback
-  brain's work as carefully as any other.
-- A job that comes back `failed` with `needs_login`: every brain was out; relay the login commands. Other
-  `failed`/`lost`: read `delegate_result` (stderr_tail, stdout_tail). A timeout → split the task or raise
-  `timeout_sec`.
+1. **Machine verdict** (free): `check: passed` / `failed …`, `escalated`. Still failing at the end of the chain →
+   read `check_result.tail` via `delegate_result`; then one targeted `delegate_followup`, or re-label as `hard`
+   and restart, or split the task.
+2. **Shape** (cheap): `delegate_result(id)` = report + diffstat, *no diff*. Touched files match the brief's
+   `Files:`? Strays → followup "revert X" without reading further.
+3. **Second opinion** (worker tokens): for non-trivial diffs, `delegate_review(id, cli="agy")` or
+   `cli="opencode"`; read only the `VERDICT` line and blocker/major findings.
+4. **Targeted read** (your tokens, last): `delegate_result(id, paths=[...])` for only the risky files (public
+   interfaces, security, concurrency, data formats). Never pull the whole diff of a large change.
 
-## 6. Review — never land unreviewed work
+`references/review-checklist.md` lists what to look for in tier 4. Fix tiny things yourself in the worktree only
+when cheaper than a followup; otherwise followup with numbered file:line points.
 
-Read `delegate_result(id)`: report, commits, diffstat, diff. Then follow `references/review-checklist.md`.
-In short:
+## 6. Land
 
-1. **Scope**: only the files the task needed; no stray edits, generated junk, or secrets.
-2. **Correctness**: read every hunk; open surrounding code in the worktree (`worktree` path in the result) when
-   the diff alone is not enough.
-3. **Verify yourself**: run the relevant tests/linters **in the worktree** (cd there). The worker's report is a
-   claim, not evidence.
-4. **Second opinion** when the change is risky or large: `delegate_review(id, cli=<other family>)`, wait, read its
-   `stdout_tail`. Weigh its findings; it can be wrong too.
+- Ask the operator before `delegate_merge` unless they told you to land approved work on their own.
+- `delegate_merge(id)` (squash) applies the worktree's change to the checked-out branch and commits once; the repo's
+  commit hooks run **once, there** (rounds are staged, not committed). It refuses while the operator's tree has
+  uncommitted tracked changes. A refusing hook leaves the change staged: report it, then fix or followup.
+- Commit message: what and why, Conventional Commits if the repo uses them, naming the worker that did it.
+- Merge = "accepted" and discard of finished work = "rejected" in the ratings. Never push unless asked.
 
-Outcome:
-- **Changes needed** → `delegate_followup(id, feedback)` with numbered, concrete points (file:line, what is wrong,
-  what you expect). After 2 rework rounds without convergence, either switch `cli` in the follow-up, fix the rest
-  yourself directly in the worktree, or discard.
-- **Small fixes** are often faster to make yourself in the worktree; commit them there before merging.
-- **Approved** → land (next step).
-- **Wrong direction** → `delegate_discard(id)` and re-brief.
+## 7. Report
 
-In compete mode, review each candidate, pick one (say why), discard the rest.
-
-## 7. Land
-
-- Landing changes the user's branch. Ask the user before `delegate_merge` unless they already told you to land
-  approved work on their own.
-- `delegate_merge(id, mode="squash", message=...)` makes one commit on the checked-out branch with a message you
-  write (Conventional Commits if the repo uses them; mention the worker CLI). `ff` keeps the worker's commits.
-  It refuses if the user's tree has uncommitted tracked changes — tell the user, don't stash their work silently.
-- The repo's commit hooks run on landing. If they fail, the squash stays staged: fix the cause, then commit.
-- Parallel pieces: land one, then the next; on a conflict, `followup` the later job with "rebase onto <branch>"
-  instructions, or resolve it yourself.
-- Never push unless the user asked.
-
-## 8. Report
-
-Tell the user, in their language: what each worker did, what you changed in review, test results you ran yourself,
-what landed (commit hashes), and anything left open. Link nothing you did not verify.
+Briefly, in the operator's language: which brain actually did each piece (`escalated`, `fell_back_from`), check
+results, what you verified, what landed (hash), what is left.
 
 ## Housekeeping
 
-`delegate_list` shows recent jobs. Discard abandoned jobs so worktrees don't pile up (they live under
-`~/.claude-delegate/worktrees/`). The same operations exist as a CLI: `python <plugin>/scripts/delegate.py --help`.
+`delegate_list` shows recent jobs; discard abandoned ones. CLI equivalent: `python <plugin>/scripts/delegate.py --help`.

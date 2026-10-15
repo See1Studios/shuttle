@@ -24,24 +24,33 @@ def delegate_clis() -> list:
 
 
 @mcp.tool()
-def delegate_start(cli: str, task: str, repo: str, title: str = "", model: str = "", base: str = "",
-                   timeout_sec: int = d.DEFAULT_TIMEOUT, chain: List[str] = [], fallback: bool = True) -> dict:
+def delegate_start(task: str, repo: str, difficulty: str = "normal", check: str = "", title: str = "",
+                   cli: str = "", model: str = "", base: str = "", timeout_sec: int = d.DEFAULT_TIMEOUT,
+                   chain: List[str] = [], fallback: bool = True, auto_fix_rounds: int = 2) -> dict:
     """Start a worker CLI on a task in a fresh git worktree of `repo` (branch delegate/<id> from `base`, default
     HEAD). Returns at once with the job id; the worker runs in the background. `task` is the full brief: goal,
-    files/area, constraints, acceptance criteria. `cli`: codex | claude | grok | agy | opencode (see delegate_clis).
+    files/area, constraints, acceptance criteria.
+    Routing (cheapest first): leave `cli` empty and set `difficulty`: easy | normal start on opencode's free models
+    and escalate to agy (Gemini, then its Claude group) when they cannot make `check` pass; hard starts on agy's
+    Claude group. Name `cli` only to force one worker (claude spends Claude quota; codex/grok may be disabled).
     When a brain hits a quota/rate limit or is not signed in, the job moves on by itself: the same CLI's other
     models (agy: Gemini group, then Claude/GPT group) and accounts, then other CLIs (unless fallback=false).
     `chain` overrides the order explicitly: ["agy:gemini-3.8-flash-high", "codex@work", "grok"]
-    (cli[:model][@account]). See delegate_chain for what would be tried."""
+    (cli[:model][@account]). See delegate_chain for what would be tried.
+    `check`: an acceptance command (e.g. "py -3 -m pytest -q tests/test_x.py") the runner executes in the worktree
+    after each round; while it fails, the worker gets its output and retries, up to auto_fix_rounds, without you.
+    Always give one when the task is testable: it is the cheapest review there is."""
     return d.start(cli, task, repo=repo, title=title, model=model, base=base, timeout=timeout_sec,
-                   chain=chain or None, fallback=fallback)
+                   chain=chain or None, fallback=fallback, check=check, auto_fix=auto_fix_rounds,
+                   difficulty=difficulty)
 
 
 @mcp.tool()
 def delegate_compete(clis: List[str], task: str, repo: str, title: str = "", base: str = "",
-                     timeout_sec: int = d.DEFAULT_TIMEOUT) -> list:
+                     timeout_sec: int = d.DEFAULT_TIMEOUT, check: str = "", auto_fix_rounds: int = 2) -> list:
     """Give the same task to several CLIs at once, each in its own worktree, to compare and land the best."""
-    return d.start_many(clis, task, repo=repo, title=title, base=base, timeout=timeout_sec)
+    return d.start_many(clis, task, repo=repo, title=title, base=base, timeout=timeout_sec, check=check,
+                        auto_fix=auto_fix_rounds)
 
 
 @mcp.tool()
@@ -60,10 +69,39 @@ def delegate_login(cli: str, account: str = "default") -> dict:
 
 
 @mcp.tool()
-def delegate_chain(cli: str, model: str = "", fallback: bool = True) -> list:
-    """The ordered brains (cli:model@account) a job started with this cli/model would try, each with its quota
-    group and any rest (quota or missing sign-in) still on it."""
-    return d.chain_view(cli, model, None, fallback)
+def delegate_agy_switch(confirm_logout: bool = False) -> dict:
+    """Swap agy to another Google account (more agy quota) through agy's own OAuth sign-in. Signs the CURRENT agy
+    account out first, so ask the operator and pass confirm_logout=true only after they agree. Returns the sign-in
+    `url`: give it to the operator to open; they sign in with the other account and paste back the response code,
+    which you pass to delegate_agy_code. Quota rests are per email, so the new account's quota is usable at once."""
+    if not confirm_logout:
+        return {"state": "not_started", "why": "this signs agy's current account out; ask the operator, then call "
+                "again with confirm_logout=true", "email_now": d.B.agy_email()}
+    import agy_login
+    return agy_login.begin()
+
+
+@mcp.tool()
+def delegate_agy_code(code: str) -> dict:
+    """Finish delegate_agy_switch: type the response code the operator copied from the Google sign-in page into
+    agy. Returns the signed-in email. The code is used once and never stored."""
+    import agy_login
+    return agy_login.finish(code)
+
+
+@mcp.tool()
+def delegate_ratings() -> list:
+    """How each brain (cli:model) has done per difficulty: score 0..1, event counts (passed, escalated, failed,
+    accepted, rework, rejected), mean worker seconds. Routing already skips brains proven weak at a difficulty;
+    read this to choose `difficulty` well and to tell the operator which workers earn their keep."""
+    return d.RT.table()
+
+
+@mcp.tool()
+def delegate_chain(difficulty: str = "normal", cli: str = "", model: str = "", fallback: bool = True) -> list:
+    """The ordered brains (cli:model@account) a job would try — for a difficulty tier, or led by `cli` — each with
+    its quota group and any rest (quota, missing sign-in, blocked) still on it."""
+    return d.chain_view(cli, model, None, fallback, "" if cli else difficulty)
 
 
 @mcp.tool()
@@ -95,11 +133,19 @@ def delegate_list(active_only: bool = True, limit: int = 30) -> list:
 
 
 @mcp.tool()
-def delegate_result(id: str, max_diff_chars: int = d.DEFAULT_MAX_DIFF) -> dict:
-    """A finished job's output for review: the worker's REPORT.md, commits, diffstat, the diff against base, and
-    the tail of its stdout/stderr. For a review job: the reviewer's answer (stdout_tail). The worktree path is in
-    the result; read files there directly when the diff is truncated or you need context."""
-    return d.result(id, max_diff_chars)
+def delegate_result(id: str, paths: List[str] = [], max_diff_chars: int = 0) -> dict:
+    """A finished job, lean: the worker's REPORT.md, diffstat, commits, short log tail, timings, fallbacks. No diff by
+    default, to save your tokens: pass `paths` for the diff of specific files (from the diffstat), or
+    max_diff_chars>0 for the whole diff up to that size. Prefer reading files in the `worktree` path for context.
+    For a review job: the reviewer's `answer`."""
+    return d.result(id, max_diff_chars, paths or None)
+
+
+@mcp.tool()
+def delegate_check(id: str, command: str, timeout_sec: int = 1800) -> dict:
+    """Run a command (tests, lint, build) in a finished job's worktree; returns exit code and a short tail only.
+    Cheaper than running it yourself and reading the full output."""
+    return d.check(id, command, timeout_sec)
 
 
 @mcp.tool()
