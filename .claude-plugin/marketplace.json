@@ -1,0 +1,12 @@
+{
+  "name": "claude-delegate",
+  "owner": { "name": "Jongwoo Park" },
+  "metadata": { "description": "Make Claude a director that delegates coding work to other agent CLIs and reviews the result." },
+  "plugins": [
+    {
+      "name": "delegate",
+      "source": "./plugins/delegate",
+      "description": "Delegate tasks to codex / claude / grok / agy / opencode in isolated git worktrees, review the diff, request rework, land it."
+    }
+  ]
+}

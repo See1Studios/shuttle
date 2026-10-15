@@ -1,0 +1,7 @@
+{
+  "name": "delegate",
+  "version": "0.1.0",
+  "description": "Director mode: delegate coding tasks to other agent CLIs in isolated git worktrees, review their diffs, request rework, and land the result.",
+  "author": { "name": "Jongwoo Park" },
+  "keywords": ["delegation", "orchestration", "worktree", "codex", "grok", "gemini", "review"]
+}

@@ -1,0 +1,16 @@
+---
+description: Check which worker CLIs and accounts are signed in, and guide sign-in or add an account for more quota
+argument-hint: "[cli] [account]"
+---
+
+Use the `orchestrate` skill (read `references/auth-and-fallback.md`).
+
+Arguments: $ARGUMENTS
+
+1. Call `delegate_auth` (for the named CLI if one is given) and show a compact table: cli, account, signed in, detail.
+2. For each account that is not signed in, show its exact login command.
+3. If a CLI and account were named, or the user agrees, call `delegate_login(cli, account)` to open the CLI's own
+   sign-in window, and tell the user to finish it there. A new account name creates a new account (more quota).
+4. When the user says they are done, run `delegate_auth` again to confirm and clear stale rests with
+   `delegate_limits(clear="<cli>@<account>")`.
+5. Finish with `delegate_limits()` so the user sees any quota group still resting and until when.
