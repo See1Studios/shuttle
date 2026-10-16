@@ -1,7 +1,7 @@
 """Swap agy's Google account through its own OAuth sign-in: logout, open the link, paste the response code.
 
-On Windows agy keeps one login in the OS credential store, so a second account cannot run side by side. Instead
-this drives agy's interactive TUI in a pseudo console (pywinpty / ConPTY): it sends `/logout`, picks Google OAuth,
+Usually not needed any more: with agy_file_auth (default) every agy account has its own home and token file, signed
+in with `delegate_login("agy", name)`. This swaps the login of the default home in place: it drives agy's interactive TUI in a pseudo console (pywinpty / ConPTY): it sends `/logout`, picks Google OAuth,
 and returns the sign-in URL; the operator opens it, signs in with the other Google account, and the response code
 they paste is typed into agy. agy's quota rests are keyed by the signed-in email (brains.quota_group), so the new
 account's quota is usable at once and the old one's rests are remembered for when it comes back.
@@ -53,7 +53,8 @@ class AgyLogin:
             raise RuntimeError("agy is not installed")
         ROOM.mkdir(parents=True, exist_ok=True)
         # very wide, so the long OAuth URL is never soft-wrapped across lines
-        self.proc = PtyProcess.spawn(exe, dimensions=(50, 2000), cwd=str(ROOM))
+        env = {**os.environ, **B.file_auth_env("agy")}   # the same login store the workers read
+        self.proc = PtyProcess.spawn(exe, dimensions=(50, 2000), cwd=str(ROOM), env=env)
         threading.Thread(target=self._reader, args=(self.proc,), daemon=True).start()
 
     def _reader(self, proc) -> None:

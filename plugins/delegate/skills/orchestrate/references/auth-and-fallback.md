@@ -25,7 +25,7 @@ the old account's rests are remembered for when it comes back.
 | CLI | Sign-in | Notes |
 |---|---|---|
 | opencode | none needed | free built-in models (`opencode models`); always run with `--standalone` so it works in the worktree |
-| agy | Google account (one at a time) | swap with `delegate_agy_switch` (below) |
+| agy | Google account, token file per account home | extra accounts with `delegate_login("agy", name)` (below) |
 | claude | `claude auth login` | spends Claude quota; never automatic |
 | codex, grok | — | disabled (no subscription); implemented, enable in `brains.json` |
 
@@ -40,10 +40,25 @@ the old account's rests are remembered for when it comes back.
    `GROK_HOME`, `XDG_DATA_HOME`). The account joins that CLI's chains. `env.json` there may hold an API key; it is
    the operator's secret — never read it out.
 
-## Swapping agy's Google account (when both agy quota groups are spent)
+## agy accounts (file auth)
 
-agy keeps a single login in the Windows credential store, so accounts cannot run side by side; they are swapped
-through agy's own OAuth sign-in:
+Every agy run (worker, auth probe, sign-in window) gets `SSH_CONNECTION=local`. agy then takes its ssh path and
+keeps the login in a token file under its home (`~/.gemini/antigravity-cli/`) instead of the Windows credential
+store's single `gemini:antigravity` entry. So:
+
+- A sign-in is a link to click, with no pasted-code deadline. By hand on the host (cmd, two lines):
+  `set SSH_CONNECTION=local` then `agy`. A web-SSH session reads the same file and does not ask again.
+- `delegate_login("agy", "<name>")` makes `~/.claude-delegate/accounts/agy/<name>/`, points agy's `HOME` /
+  `USERPROFILE` there and opens agy's sign-in for it. Accounts run side by side and join agy's chains.
+- Trade-off: the token is a plain file, readable by anything running as this Windows user, not an encrypted
+  credential-store entry. Never read it out. `"agy_file_auth": false` in `brains.json` restores the credential
+  store (one account; swap below).
+- After first turning file auth on, the default account is signed out until it is signed in once this way.
+
+## Swapping agy's Google account in place (legacy; one-home setups)
+
+With `agy_file_auth` off, agy keeps a single login in the Windows credential store, so accounts cannot run side
+by side; they are swapped through agy's own OAuth sign-in:
 
 1. Ask the operator: the current agy account gets signed out.
 2. `delegate_agy_switch(confirm_logout=true)` drives agy in a pseudo console: `/logout`, Google OAuth, and returns

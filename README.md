@@ -71,8 +71,10 @@ CLI without Claude: `python plugins/delegate/scripts/delegate.py --help` — `st
 
 ## Sign-in and accounts
 
-opencode needs none (free models). agy has one Google login at a time on Windows: swap it with
-`delegate.py agy-switch` (link + pasted code); its quota rests are kept per email. claude / codex / grok support
+opencode needs none (free models). agy runs with `SSH_CONNECTION=local`, so its login is a token file under its
+home rather than the Windows credential store: sign-in is a link to click, and extra agy accounts run side by side
+like the other CLIs' (`brains.json` `"agy_file_auth": false` turns this off; then `delegate.py agy-switch` swaps
+the single login). The token file is plain, readable by this Windows user's processes. claude / codex / grok support
 extra accounts through per-account config folders. Guide: `plugins/delegate/skills/orchestrate/references/auth-and-fallback.md`.
 
 ## Worker permissions (safety)

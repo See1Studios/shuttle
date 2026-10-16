@@ -41,7 +41,7 @@ LOGIN_ARGV = {"codex": ["codex", "login"], "claude": ["claude", "auth", "login"]
 LOGIN_HINT = {"codex": "browser sign-in to ChatGPT, or `codex login --with-api-key` with OPENAI_API_KEY on stdin",
               "claude": "browser sign-in; or run `claude setup-token` and put CLAUDE_CODE_OAUTH_TOKEN in the account's env.json",
               "grok": "browser sign-in (`grok login --device-auth` without a browser); or XAI_API_KEY in env.json",
-              "agy": "use `delegate.py agy-switch` (or delegate_agy_switch): it opens agy's Google OAuth link and takes the pasted code",
+              "agy": "click the Google sign-in link agy prints (no time limit); the token is saved under the account's home",
               "opencode": "pick a provider and paste its key or sign in"}
 
 DEFAULTS = {
@@ -67,7 +67,9 @@ DEFAULTS = {
                  "claude": ["agy", "codex", "opencode", "grok"]},
     "order": "model-first",      # model-first: a model on every account before the next model; or account-first
     "auth_rest_sec": 6 * 3600,
-    "commit_rounds": False,      # True: commit each round on the job branch (runs the repo's hooks every round)   # a brain that is not signed in is skipped this long (or until `limits clear`)
+    "commit_rounds": False,      # True: commit each round on the job branch (runs the repo's hooks every round)
+    # agy keeps its login in a token file under its home instead of the OS credential store (see FILE_AUTH_ENV).
+    "agy_file_auth": True,
     # Paths a worker's tools write that must never be committed (added to the repo's .git/info/exclude).
     "exclude": ["/.delegate/", "graft/.cache/", "graft/.graph/"],
 }
@@ -170,12 +172,26 @@ def accounts(cli: str) -> List[str]:
     return ["default"] + extra
 
 
+# agy run outside ssh keeps its login in the OS credential store under one fixed name (gemini:antigravity on
+# Windows), whatever HOME is. With SSH_CONNECTION set it takes the ssh path and keeps a token file under its home
+# (~/.gemini/antigravity-cli/) instead, so each account home holds its own login and a sign-in is a plain link to
+# click, with no pasted-code deadline. Set for every agy run (workers, probes, sign-in) so they all read one place.
+FILE_AUTH_ENV = {"agy": {"SSH_CONNECTION": "local"}}
+
+
+def file_auth_env(cli: str) -> Dict[str, str]:
+    if cli == "agy" and not config().get("agy_file_auth", True):
+        return {}
+    return dict(FILE_AUTH_ENV.get(cli, {}))
+
+
 def account_env(cli: str, account: str) -> Dict[str, str]:
-    """Variables that point `cli` at `account` (empty for the default login), plus the account's env.json."""
+    """Variables that point `cli` at `account` (none for the default login's home), plus the account's env.json."""
     d = account_dir(cli, account)
     if not d:
-        return {}
+        return file_auth_env(cli)
     env = {k: str(d) for k in ACCOUNT_ENV.get(cli, [])}
+    env.update(file_auth_env(cli))
     try:
         extra = json.loads((d / "env.json").read_text(encoding="utf-8"))
         env.update({str(k): str(v) for k, v in extra.items()})
@@ -189,11 +205,10 @@ def add_account(cli: str, name: str) -> Path:
         raise ValueError("unknown cli %r" % cli)
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,40}", name) or name == "default":
         raise ValueError("account name must be letters, digits, . _ - (and not 'default')")
-    if cli == "agy" and IS_WIN:
-        raise ValueError("agy keeps its login in the Windows credential store under one fixed name "
-                         "(gemini:antigravity), whatever HOME is, so a second agy account cannot run side by side here. "
-                         "Swap the signed-in Google account instead with `agy-switch` (OAuth link + pasted code); "
-                         "quota rests are kept per email.")
+    if cli == "agy" and IS_WIN and not file_auth_env(cli):
+        raise ValueError("with agy_file_auth off, agy keeps its login in the Windows credential store under one fixed "
+                         "name (gemini:antigravity), whatever HOME is, so a second agy account cannot run side by side. "
+                         "Turn agy_file_auth back on in brains.json, or swap the account with `agy-switch`.")
     d = ACCOUNTS / cli / name
     d.mkdir(parents=True, exist_ok=True)
     if cli == "agy":   # keep the operator's agy settings (permissions, MCP) in the new home
@@ -241,7 +256,7 @@ def auth_status(cli: str, account: str, base_env: Dict[str, str]) -> Dict:
         code, text = _probe(["grok", "models"], env)
         first = text.splitlines()[0] if text else ""
         out.update(logged_in=code == 0 and "logged in" in first.lower(), detail=first[:200])
-    elif cli == "agy":    # the login lives in the OS credential store, not a file: listing models needs it
+    elif cli == "agy":    # listing models needs a valid login (token file with file auth, else the credential store)
         code, text = _probe(["agy-real", "models"], env, timeout=60)
         n = sum(1 for line in text.splitlines() if "\t" in line)
         out.update(logged_in=code == 0 and n > 0, detail=("%d models" % n) if n else text[-200:])
@@ -258,7 +273,8 @@ def auth_status(cli: str, account: str, base_env: Dict[str, str]) -> Dict:
 
 def login_command(cli: str, account: str) -> str:
     """The command an operator types in a terminal to sign this account in (PowerShell on Windows)."""
-    env = {k: v for k, v in account_env(cli, account).items() if k in ACCOUNT_ENV.get(cli, [])}
+    keep = set(ACCOUNT_ENV.get(cli, [])) | set(FILE_AUTH_ENV.get(cli, {}))   # never env.json's secrets
+    env = {k: v for k, v in account_env(cli, account).items() if k in keep}
     argv = " ".join(LOGIN_ARGV[cli])
     if not env:
         return argv

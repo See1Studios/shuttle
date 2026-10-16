@@ -14,6 +14,8 @@ Arguments: $ARGUMENTS
 4. When the user says they are done, run `delegate_auth` again to confirm and clear stale rests with
    `delegate_limits(clear="<cli>@<account>")`.
 5. Finish with `delegate_limits()` so the user sees any quota group still resting and until when.
-6. `agy-switch` (or both agy quota groups resting): explain that agy's current Google account will be signed out;
+6. Both agy quota groups resting: suggest another agy account, `delegate_login("agy", "<name>")` (file auth: its
+   own home and token file, sign-in is a link to click). Only with `agy_file_auth` off, or when the user asks for
+   `agy-switch`: explain that agy's current Google account will be signed out;
    only on the user's yes call `delegate_agy_switch(confirm_logout=true)`, give them the returned `url`, and pass
    the response code they paste back to `delegate_agy_code`. Report the new email.
