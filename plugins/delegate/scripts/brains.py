@@ -20,6 +20,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -29,6 +30,8 @@ ACCOUNTS = HOME / "accounts"
 LIMITS = HOME / "limits.json"
 LOGIN_PROMPTS = HOME / "login-prompts.json"   # when a sign-in window was last opened per cli@account
 OPENCODE_MODELS = HOME / "opencode-models.json"   # cached `opencode models` (free built-in list)
+AGY_MODELS = HOME / "agy-models.json"             # cached `agy models`
+MODELS_TTL = 6 * 3600
 CONFIG = HOME / "brains.json"
 IS_WIN = os.name == "nt"
 USER_HOME = Path.home()
@@ -47,18 +50,26 @@ LOGIN_HINT = {"codex": "browser sign-in to ChatGPT, or `codex login --with-api-k
               "opencode": "pick a provider and paste its key or sign in"}
 
 DEFAULTS = {
-    "models": {"agy": ["gemini-3.8-flash-high", "claude-sonnet-5-5-high"]},
+    # Models a named CLI runs, in order. agy has none here: its models are read from `agy models` and ranked (below).
+    "models": {},
     # The point of delegating is to spend the workers' quota instead of the director's (Claude's), so the default
     # worker is agy and `claude` is never a fallback: it runs only when asked for by name or in an explicit chain.
     "default_cli": "agy",
     # Cost order on this host: opencode free models < agy (paid, plentiful) < Claude (scarce; never automatic).
     # A job without an explicit cli/chain starts at its difficulty tier's first brain; when a brain cannot make the
     # job's check pass (after its automatic fix rounds) or fails outright, the next brain takes over the worktree.
-    "tiers": {
-        "easy":   ["opencode", "agy:gemini-3.8-flash-medium", "agy:gemini-3.8-flash-high"],
-        "normal": ["opencode", "agy:gemini-3.8-flash-high", "agy:claude-sonnet-5-5-high"],
-        "hard":   ["agy:claude-sonnet-5-5-high", "agy:gemini-3.8-flash-high"],
-    },
+    # Tiers are built from agy's live model list (auto_tier); a tier set here replaces that tier, e.g.
+    # "tiers": {"hard": ["agy:gemini-4-argon-high", "agy:claude-opus-5-5-high"]}.
+    "tiers": {},
+    # agy model families, smartest first (substring of the model name). Each family's newest version is used;
+    # a model matching none ranks last and is not put in a tier. Effort is the -low/-medium/-high suffix.
+    "agy_rank": ["argon", "opus", "sonnet", "flash"],
+    # The rank entry from which on a family is a "fast" one (cheap first rungs); those before it are "strong".
+    "agy_fast": "flash",
+    # agy's quota pools: the first substring that matches the model name; anything else is its own pool.
+    "agy_quota_groups": [["argon", "argon"], ["gemini", "gemini"], ["claude", "claude-gpt"], ["gpt", "claude-gpt"]],
+    # Reasoning effort per difficulty: agy picks the model's -low/-medium/-high variant, claude/codex get a flag.
+    "effort": {"easy": "low", "normal": "medium", "hard": "high"},
     "default_difficulty": "normal",
     # Implemented but not used: never in a default chain or fallback, not checked by `auth`, and refused when named.
     # Remove a name here (in brains.json) to use that CLI. codex and grok: no subscription on this host.
@@ -74,13 +85,27 @@ DEFAULTS = {
     # for the sign-in to land and then carries on with that worker. 0 turns the window / the wait off.
     "login_prompt_sec": 15 * 60,
     "login_wait_sec": 15 * 60,
+    # A worker whose logs, worktree and own CLI logs all stay unchanged this long is stuck (observed: free models
+    # that went silent mid-task and sat there 15+ min). It is stopped, its quota group rests 15 min, and the next
+    # brain takes over. 0 turns this off (only the job timeout then).
+    "stall_sec": 4 * 60,
     # opencode without a model runs its free built-in models (no sign-in): the first `opencode_free_top` of
     # `opencode models`' opencode/* list, those matching `opencode_prefer` first, each with its own quota rest.
-    "opencode_prefer": ["deepseek", "glm", "nemotron-3-ultra", "longcat", "mimo", "big-pickle"],
+    # Measured on one test-backed task (2026-10-16): space-bunny 68 s, deepseek 124 s, mimo 141 s, longcat 440 s,
+    # glm and nemotron-3-ultra unfinished after 15 min. Ratings re-rank them from real jobs over time.
+    "opencode_prefer": ["space-bunny", "deepseek", "mimo", "longcat", "big-pickle", "glm", "nemotron"],
     "opencode_free_top": 3,
     "commit_rounds": False,      # True: commit each round on the job branch (runs the repo's hooks every round)
     # agy keeps its login in a token file under its home instead of the OS credential store (see FILE_AUTH_ENV).
     "agy_file_auth": True,
+    # agy reads its permissions only from $HOME/.gemini/antigravity-cli/settings.json, and in headless mode a
+    # command it may not run without asking ends the whole run with nothing done; an explicit deny instead hands
+    # the model an error and it carries on (a deny also beats any allow). So workers run in a home of their own
+    # (accounts/agy/default for the default account; sign in there once) whose settings.json is the operator's
+    # plus these permissions. The operator's own agy settings are never changed. False: workers use the operator's
+    # home and settings as they are.
+    "agy_worker_home": True,
+    "agy_permissions": {"deny": ["command(*)"]},
     # Paths a worker's tools write that must never be committed (added to the repo's .git/info/exclude).
     "exclude": ["/.delegate/", "graft/.cache/", "graft/.graph/"],
 }
@@ -140,10 +165,12 @@ AGY_LOG_DIR = USER_HOME / ".gemini" / "antigravity-cli" / "log"
 _AGY_AUTH_RE = re.compile(rb"authenticated successfully as (\S+@\S+)")
 
 
-def agy_email() -> str:
-    """The Google account agy is signed in with, from its newest CLI logs ("" when unknown)."""
+def agy_email(home: Optional[Path] = None) -> str:
+    """The Google account agy is signed in with in `home` (default: the operator's), from its newest CLI logs
+    ("" when unknown)."""
+    log_dir = (home / ".gemini" / "antigravity-cli" / "log") if home else AGY_LOG_DIR
     try:
-        logs = sorted(AGY_LOG_DIR.glob("cli-*.log"), key=lambda p: p.stat().st_mtime, reverse=True)[:8]
+        logs = sorted(log_dir.glob("cli-*.log"), key=lambda p: p.stat().st_mtime, reverse=True)[:8]
     except OSError:
         return ""
     for log in logs:
@@ -165,23 +192,51 @@ def quota_group(b: Dict) -> str:
     if b["cli"] == "opencode" and b.get("model"):   # each free model has its own limits
         group = b["model"]
     if b["cli"] == "agy":
-        m = (b.get("model") or "").lower()
-        group = "gemini" if (not m or m.startswith("gemini")) else "claude-gpt"
+        m = (b.get("model") or "").lower() or "gemini"
+        group = next((g for part, g in config().get("agy_quota_groups") or [] if part in m), split_effort(m)[0])
         if account == "default":
-            account = agy_email() or "default"
+            account = agy_email(account_dir("agy", "default")) or agy_email() or "default"
     return "%s@%s#%s" % (b["cli"], account, group)
 
 
 # ------------------------------------------------------------------ accounts
 
 def account_dir(cli: str, account: str) -> Optional[Path]:
-    return None if account in ("", "default") else ACCOUNTS / cli / account
+    if account in ("", "default"):
+        return ACCOUNTS / "agy" / "default" if cli == "agy" and config().get("agy_worker_home", True) else None
+    return ACCOUNTS / cli / account
+
+
+def agy_worker_settings(home: Path) -> Path:
+    """Write the worker home's agy settings.json: the operator's settings plus `agy_permissions`."""
+    src = USER_HOME / ".gemini" / "antigravity-cli" / "settings.json"
+    dst = home / ".gemini" / "antigravity-cli" / "settings.json"
+    try:
+        settings = json.loads(src.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        settings = {}
+    settings["permissions"] = config().get("agy_permissions") or {}
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    # The default account's worker home is the operator's own Google login: seed it with that token file instead
+    # of asking for a second sign-in. (A named account is another Google account and signs in itself.)
+    token = dst.parent / "antigravity-oauth-token"
+    own = USER_HOME / ".gemini" / "antigravity-cli" / "antigravity-oauth-token"
+    if home == account_dir("agy", "default") and not token.exists() and own.exists():
+        shutil.copy2(own, token)
+    text = json.dumps(settings, indent=2, ensure_ascii=False)
+    try:
+        if dst.read_text(encoding="utf-8") == text:
+            return dst
+    except OSError:
+        pass
+    dst.write_text(text, encoding="utf-8")
+    return dst
 
 
 def accounts(cli: str) -> List[str]:
     """`default` first, then every account directory made for this CLI (sorted)."""
     d = ACCOUNTS / cli
-    extra = sorted(p.name for p in d.iterdir() if p.is_dir()) if d.exists() else []
+    extra = sorted(p.name for p in d.iterdir() if p.is_dir() and p.name != "default") if d.exists() else []
     return ["default"] + extra
 
 
@@ -205,6 +260,8 @@ def account_env(cli: str, account: str) -> Dict[str, str]:
         return file_auth_env(cli)
     env = {k: str(d) for k in ACCOUNT_ENV.get(cli, [])}
     env.update(file_auth_env(cli))
+    if cli == "agy" and config().get("agy_worker_home", True):
+        agy_worker_settings(d)
     try:
         extra = json.loads((d / "env.json").read_text(encoding="utf-8"))
         env.update({str(k): str(v) for k, v in extra.items()})
@@ -224,7 +281,7 @@ def add_account(cli: str, name: str) -> Path:
                          "Turn agy_file_auth back on in brains.json, or swap the account with `agy-switch`.")
     d = ACCOUNTS / cli / name
     d.mkdir(parents=True, exist_ok=True)
-    if cli == "agy":   # keep the operator's agy settings (permissions, MCP) in the new home
+    if cli == "agy" and not config().get("agy_worker_home", True):   # keep the operator's agy settings
         src = USER_HOME / ".gemini" / "antigravity-cli" / "settings.json"
         dst = d / ".gemini" / "antigravity-cli" / "settings.json"
         if src.exists() and not dst.exists():
@@ -315,6 +372,17 @@ def open_login(cli: str, account: str, base_env: Dict[str, str]) -> Dict:
     if not exe:
         raise RuntimeError("%s is not installed" % argv[0])
     env = {**base_env, **account_env(cli, account)}
+    if IS_WIN and cli == "agy":   # a console's long link cannot be clicked: drive agy and open it in the browser
+        try:
+            import winpty  # noqa: F401
+            subprocess.Popen([sys.executable, str(Path(__file__).with_name("signin.py")), cli, account or "default"],
+                             env={**env, "DELEGATE_HOME": str(HOME)},   # USERPROFILE now points at the account home stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             creationflags=0x00000200 | 0x08000000)
+            return {"cli": cli, "account": account, "opened_window": True, "browser": True,
+                    "command": login_command(cli, account), "hint": LOGIN_HINT[cli],
+                    "next": "the Google sign-in page opens in the browser; finish it there"}
+        except ImportError:
+            pass
     if IS_WIN:
         subprocess.Popen([exe] + argv[1:], env=env, creationflags=0x00000010)   # CREATE_NEW_CONSOLE
         opened = True
@@ -411,8 +479,113 @@ def wait_for_login(brains: List[Dict], base_env: Dict[str, str], seconds: int, e
     return None
 
 
-def chain_for(cli: str, model: str = "", fallback: bool = True, installed=None) -> List[Dict]:
-    """The default chain for a job given its first CLI: that CLI's models x accounts, then the fallback CLIs'."""
+# ------------------------------------------------------------------ agy models, ranked
+
+EFFORTS = ("low", "medium", "high")
+_NEAREST = {"low": ("low", "medium", "high"), "medium": ("medium", "high", "low"), "high": ("high", "medium", "low")}
+# Used only while `agy models` has never answered (signed out on a fresh install).
+AGY_SEED = ["gemini-4-argon-low", "gemini-4-argon-medium", "gemini-4-argon-high", "claude-opus-5-5-low",
+            "claude-opus-5-5-medium", "claude-opus-5-5-high", "claude-sonnet-5-5-low", "claude-sonnet-5-5-medium",
+            "claude-sonnet-5-5-high", "gemini-3.8-flash-low", "gemini-3.8-flash-medium", "gemini-3.8-flash-high"]
+
+
+def split_effort(model: str) -> Tuple[str, str]:
+    """'gemini-4-argon-high' -> ('gemini-4-argon', 'high'); no effort suffix -> (model, '')."""
+    base, _, eff = model.rpartition("-")
+    return (base, eff) if base and eff in EFFORTS else (model, "")
+
+
+def agy_models(refresh: bool = False) -> List[str]:
+    """agy's model ids, read from `agy models` (cached MODELS_TTL, so a new model shows up by itself)."""
+    try:
+        cached = json.loads(AGY_MODELS.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        cached = {}
+    if not refresh and time.time() - cached.get("at", 0) < MODELS_TTL and cached.get("models"):
+        return cached["models"]
+    models: List[str] = []
+    if shutil.which("agy-real"):
+        code, text = _probe(["agy-real", "models"], {**os.environ, **account_env("agy", "default")}, timeout=60)
+        models = [line.split("\t")[0].strip() for line in text.splitlines()
+                  if "\t" in line and line.split("\t")[0].strip()]
+    if models:
+        HOME.mkdir(parents=True, exist_ok=True)
+        AGY_MODELS.write_text(json.dumps({"at": time.time(), "models": models}), encoding="utf-8")
+        return models
+    return cached.get("models") or list(AGY_SEED)
+
+
+def _version(base: str) -> Tuple[int, ...]:
+    return tuple(int(n) for n in re.findall(r"\d+", base))
+
+
+def agy_ladder(models: Optional[List[str]] = None) -> List[Dict]:
+    """agy's model families, smartest first by `agy_rank`, with the efforts each has. Per rank entry only the
+    newest version is ranked; older versions and families matching no entry follow with rank None."""
+    rank = [r.lower() for r in config().get("agy_rank") or []]
+    fams: Dict[str, List[str]] = {}
+    for m in models if models is not None else agy_models():
+        base, eff = split_effort(m)
+        fams.setdefault(base, [])
+        if eff and eff not in fams[base]:
+            fams[base].append(eff)
+    rows = []
+    for base, effs in fams.items():
+        hits = [i for i, r in enumerate(rank) if r in base.lower()]
+        rows.append({"family": base, "rank": hits[0] if hits else None, "efforts": sorted(effs, key=EFFORTS.index)})
+    rows.sort(key=lambda r: (r["rank"] if r["rank"] is not None else len(rank), tuple(-v for v in _version(r["family"]))))
+    seen, out = set(), []
+    for r in rows:
+        if r["rank"] is not None and r["rank"] in seen:
+            r = {**r, "rank": None, "older": True}
+        elif r["rank"] is not None:
+            seen.add(r["rank"])
+        out.append(r)
+    return sorted(out, key=lambda r: r["rank"] is None)
+
+
+def agy_model(family: Dict, effort: str) -> str:
+    """The family's model at `effort`, or the nearest effort it has."""
+    for e in _NEAREST.get(effort, EFFORTS):
+        if e in family["efforts"]:
+            return "%s-%s" % (family["family"], e)
+    return family["family"]
+
+
+def auto_tier(difficulty: str, ladder: Optional[List[Dict]] = None) -> List[str]:
+    """A difficulty tier from the ranked agy ladder (strong = families ranked before `agy_fast`):
+    easy:   opencode free -> fast low -> fast medium -> fast high           (cheap first, climb on failure)
+    normal: opencode free -> fast high -> strong at medium, weakest first  (climb on failure)
+    hard:   strong at high, smartest first -> fast high                    (best first, fall back on quota)"""
+    cfg = config()
+    ladder = [r for r in (ladder if ladder is not None else agy_ladder()) if r["rank"] is not None]
+    fast_at = next((i for i, r in enumerate(cfg.get("agy_rank") or []) if r == cfg.get("agy_fast")), None)
+    strong = [r for r in ladder if fast_at is None or r["rank"] < fast_at]
+    fast = next((r for r in ladder if fast_at is not None and r["rank"] >= fast_at), None)
+    eff = (cfg.get("effort") or {}).get(difficulty, "medium")
+
+    def agy(fam: Dict, e: str) -> str:
+        return "agy:" + agy_model(fam, e)
+    if difficulty == "easy":
+        out = ["opencode"] + ([agy(fast, e) for e in EFFORTS] if fast else [agy(f, eff) for f in reversed(strong)])
+    elif difficulty == "hard":
+        out = [agy(f, eff) for f in strong] + ([agy(fast, "high")] if fast else [])
+    else:
+        out = ["opencode"] + ([agy(fast, "high")] if fast else []) + [agy(f, eff) for f in reversed(strong)]
+    return list(dict.fromkeys(out))
+
+
+def tiers() -> Dict[str, List[str]]:
+    """Every difficulty tier: brains.json `tiers` where set, the rest built from the agy ladder."""
+    own = config().get("tiers") or {}
+    out = {d: own.get(d) or auto_tier(d) for d in ("easy", "normal", "hard")}
+    out.update({d: v for d, v in own.items() if d not in out})
+    return out
+
+
+def chain_for(cli: str, model: str = "", fallback: bool = True, installed=None, difficulty: str = "") -> List[Dict]:
+    """The default chain for a job given its first CLI: that CLI's models x accounts, then the fallback CLIs'.
+    agy without a model runs the agy rungs of the difficulty's tier."""
     cfg = config()
     off = set(cfg.get("disabled") or [])
     clis = [cli] + ([c for c in cfg["fallback"].get(cli, []) if c != cli and c not in off] if fallback else [])
@@ -420,7 +593,9 @@ def chain_for(cli: str, model: str = "", fallback: bool = True, installed=None) 
     for i, c in enumerate(clis):
         if installed and not installed(c):
             continue
-        models = [model] if (i == 0 and model) else (cfg["models"].get(c) or [""])
+        models = [model] if (i == 0 and model) else (cfg["models"].get(c) or (
+            [parse(t)["model"] for t in tiers()[difficulty or cfg.get("default_difficulty") or "normal"]
+             if t.startswith("agy:")] if c == "agy" else [""]))
         accts = accounts(c)
         pairs = ([(m, a) for m in models for a in accts] if cfg.get("order") != "account-first"
                  else [(m, a) for a in accts for m in models])
@@ -431,12 +606,12 @@ def chain_for(cli: str, model: str = "", fallback: bool = True, installed=None) 
 def tier_chain(difficulty: str, installed=None) -> List[Dict]:
     """The brains of a difficulty tier, each spread over that CLI's accounts, minus disabled / missing CLIs."""
     cfg = config()
-    tiers = cfg.get("tiers") or {}
-    if difficulty not in tiers:
-        raise ValueError("difficulty must be one of %s" % ", ".join(tiers))
+    all_tiers = tiers()
+    if difficulty not in all_tiers:
+        raise ValueError("difficulty must be one of %s" % ", ".join(all_tiers))
     off = set(cfg.get("disabled") or [])
     out: List[Dict] = []
-    for spec in tiers[difficulty]:
+    for spec in all_tiers[difficulty]:
         b = parse(spec)
         if b["cli"] in off or (installed and not installed(b["cli"])):
             continue

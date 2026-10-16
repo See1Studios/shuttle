@@ -21,6 +21,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import brains as B  # noqa: E402
 import delegate as d  # noqa: E402
+import signin as S  # noqa: E402
 
 DEFAULT_PORT = 8765
 _auth = {"at": 0.0, "rows": [], "busy": False}
@@ -47,14 +48,18 @@ def auth_view(refresh: bool = False) -> dict:
 
 def state() -> dict:
     chains = {}
-    for tier in (B.config().get("tiers") or {}):
+    for tier in B.tiers():
         try:
             chains[tier] = d.chain_view(difficulty=tier)
         except (RuntimeError, ValueError) as e:
             chains[tier] = [{"brain": "error: %s" % e, "resting_until": "", "rest_kind": ""}]
     return {"jobs": d.list_jobs(False, 40), "limits": B.limits(), "chains": chains,
             "free": B.opencode_free_models(), "free_top": B.config().get("opencode_free_top"),
-            "auth": auth_view(), "now": time.time()}
+            "ladder": [{**r, "group": B.quota_group({"cli": "agy", "model": B.agy_model(r, "high"), "account": "default"})
+                        .split("#")[-1]} for r in B.agy_ladder()],
+            "auth": auth_view(), "now": time.time(),
+            "signin": {"%s@%s" % (r["cli"], r["account"]): S.read_state(r["cli"], r["account"])
+                       for r in _auth["rows"] if r.get("cli") == "agy"}}
 
 
 def act(path: str, body: dict) -> object:
@@ -67,7 +72,7 @@ def act(path: str, body: dict) -> object:
     if path == "/api/clear":
         return {"cleared": B.clear_limits(body.get("group", ""))}
     if path == "/api/models":
-        return {"free": B.opencode_free_models(refresh=True)}
+        return {"free": B.opencode_free_models(refresh=True), "agy": B.agy_models(refresh=True)}
     if path == "/api/cancel":
         return d.cancel(body["id"])
     if path == "/api/discard":
@@ -150,9 +155,11 @@ button.p{background:var(--acc);color:var(--accfg);border-color:var(--acc)}button
 <main>
 <section><h2>워커 로그인<span class="sp"></span><span class="mute" id="authAt"></span><button onclick="post('/api/auth',{}).then(load)">다시 확인</button></h2>
 <div class="scroll"><table id="auth"></table></div>
-<p class="mute" style="margin:8px 0 0">로그인 버튼을 누르면 이 PC에 해당 CLI의 로그인 창이 뜹니다. 끝내면 자동으로 다시 확인합니다. opencode는 로그인 없이 무료 모델을 씁니다.</p></section>
+<p class="mute" style="margin:8px 0 0">로그인 버튼을 누르면 agy는 브라우저에 구글 로그인 페이지가, 다른 CLI는 이 PC에 로그인 창이 뜹니다. 끝내면 자동으로 다시 확인합니다. opencode는 로그인 없이 무료 모델을 씁니다. agy 워커는 원래 agy 로그인을 그대로 이어 씁니다.</p></section>
 <section><h2>쉬는 중 (한도 / 로그인 / 권한)<span class="sp"></span><button onclick="clearAll()">모두 해제</button></h2><div class="scroll"><table id="limits"></table></div></section>
 <section><h2>opencode 무료 모델<span class="sp"></span><button onclick="post('/api/models',{}).then(load)">목록 갱신</button></h2><div id="free"></div></section>
+<section><h2>agy 모델 순위 (똑똑한 순)<span class="sp"></span><button onclick="post('/api/models',{}).then(load)">목록 갱신</button></h2><div class="scroll"><table id="ladder"></table></div>
+<p class="mute" style="margin:8px 0 0">agy models에서 6시간마다 다시 읽습니다. 순위는 brains.json의 <span class="mono">agy_rank</span>, 노력 레벨은 난이도별 <span class="mono">effort</span> (easy=low, normal=medium, hard=high).</p></section>
 <section><h2>난이도별 체인</h2><div id="chains"></div></section>
 <section class="wide"><h2>작업</h2><div class="scroll"><table id="jobs"></table></div></section>
 </main><div id="toast"></div>
@@ -163,13 +170,13 @@ function toast(t){const e=$("toast");e.textContent=t;e.style.display="block";cle
 async function post(u,b){const r=await fetch(u,{method:"POST",headers:{"Content-Type":"application/json","X-Delegate":"1"},body:JSON.stringify(b)});
  const j=await r.json();if(!r.ok){toast(j.error||("오류 "+r.status));throw j}return j}
 async function login(cli,account){try{const r=await post("/api/login",{cli,account});
- toast(r.opened_window?`${cli} 로그인 창을 열었습니다. 그 창에서 로그인을 마치세요.`:`이 PC에서 실행: ${r.command}`);
+ toast(r.browser?`${cli} 로그인 페이지를 브라우저에 엽니다. 안 열리면 표의 '로그인 페이지 열기'를 누르세요.`:r.opened_window?`${cli} 로그인 창을 열었습니다. 그 창에서 로그인을 마치세요.`:`이 PC에서 실행: ${r.command}`);
  setTimeout(()=>post("/api/auth",{}).then(load),20000)}catch(e){}}
 async function clearAll(){await post("/api/clear",{group:""});load()}
 async function clr(g){await post("/api/clear",{group:g});load()}
 async function cancelJob(id){if(confirm(id+" 작업을 취소할까요?")){await post("/api/cancel",{id});load()}}
 async function discardJob(id){if(confirm(id+" 작업과 워크트리를 버릴까요?")){await post("/api/discard",{id});load()}}
-const KIND={unavailable:"한도",auth:"로그인 필요",blocked:"권한 막힘"};
+const KIND={unavailable:"한도",auth:"로그인 필요",blocked:"권한 막힘",stalled:"멈춤"};
 const ST={running:"warn",starting:"warn",done:"ok",merged:"ok",failed:"bad",cancelled:"idle",discarded:"idle"};
 function render(s){
  const a=s.auth;$("authAt").textContent=a.busy?"확인 중…":(a.checked?new Date(a.checked*1000).toLocaleTimeString()+" 확인":"");
@@ -177,7 +184,8 @@ function render(s){
   <td><b>${esc(r.cli)}</b></td><td>${esc(r.account)}</td>
   <td>${r.logged_in===null?'<span class="pill idle">확인 안 함</span>':r.logged_in?'<span class="pill ok">로그인됨</span>':'<span class="pill bad">로그인 필요</span>'}</td>
   <td class="mono mute">${esc((r.detail||"").split("\n").pop())}</td>
-  <td>${r.logged_in===false?`<button class="p" onclick="login('${esc(r.cli)}','${esc(r.account)}')">로그인</button>`:""}</td></tr>`).join("")
+  <td>${r.logged_in===false?`<button class="p" onclick="login('${esc(r.cli)}','${esc(r.account)}')">로그인</button>`:""}
+  ${(()=>{const g=(s.signin||{})[r.cli+"@"+r.account]||{};return g.state==="awaiting_browser"&&g.url?`<div style="margin-top:4px"><a href="${esc(g.url)}" target="_blank" rel="noopener">로그인 페이지 열기</a></div>`:g.state==="failed"?`<div class="mute" style="font-size:12px">${esc((g.error||"").slice(0,120))}</div>`:""})()}</td></tr>`).join("")
   :`<tr><td colspan=5 class="empty">${a.busy?"확인 중… (agy는 1분 가까이 걸릴 수 있습니다)":"없음"}</td></tr>`);
  $("limits").innerHTML=s.limits.length?"<tr><th>그룹</th><th>이유</th><th>까지</th><th></th></tr>"+s.limits.map(l=>`<tr>
   <td class="mono">${esc(l.group)}</td><td><span class="pill ${l.kind==="unavailable"?"warn":"bad"}">${esc(KIND[l.kind]||l.kind)}</span>
@@ -186,6 +194,9 @@ function render(s){
  $("free").innerHTML=s.free.length?`<div class="chain">${s.free.map((m,i)=>`<span ${i<s.free_top?'style="border-color:var(--acc)"':""}>${esc(m.replace("opencode/",""))}</span>`).join("")}</div>
   <div class="mute">파란 테두리 ${s.free_top}개를 차례로 씁니다 (한도에 걸리면 다음 모델로). 순서는 brains.json의 <span class="mono">opencode_prefer</span>.</div>`
   :'<div class="empty">목록을 못 받았습니다. 목록 갱신을 눌러보세요.</div>';
+ $("ladder").innerHTML="<tr><th>순위</th><th>모델</th><th>노력 레벨</th><th>쿼터 그룹</th></tr>"+s.ladder.map(r=>`<tr>
+  <td>${r.rank===null?'<span class="mute">-</span>':r.rank+1}</td><td class="mono">${esc(r.family)}${r.older?' <span class="mute">(구버전)</span>':""}</td>
+  <td>${r.efforts.map(e=>`<span class="pill idle">${esc(e)}</span>`).join(" ")}</td><td class="mono mute">${esc(r.group)}</td></tr>`).join("");
  $("chains").innerHTML=Object.entries(s.chains).map(([t,c])=>`<div><b>${esc(t)}</b><div class="chain">${c.map(b=>
   `<span class="${b.resting_until?"rest":""}" title="${esc(b.resting_until?(KIND[b.rest_kind]||b.rest_kind)+" ~"+b.resting_until:"")}">${esc(b.brain.replace("@default","").replace("opencode/",""))}</span>`).join("")}</div></div>`).join("");
  $("jobs").innerHTML=s.jobs.length?"<tr><th>작업</th><th>상태</th><th>워커</th><th>시작</th><th>내용</th><th></th></tr>"+s.jobs.map(j=>{

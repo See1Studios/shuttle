@@ -51,11 +51,11 @@ TAIL = 4000
 PROVIDERS: Dict[str, Dict] = {
     "codex": {"work": ["codex", "exec", "-s", "workspace-write", "--skip-git-repo-check"],
               "review": ["codex", "exec", "-s", "read-only", "--skip-git-repo-check"],
-              "model_flag": "-m", "author": ("Codex", "codex@localhost"),
+              "model_flag": "-m", "effort_flag": ["-c", "model_reasoning_effort={}"], "author": ("Codex", "codex@localhost"),
               "note": "OpenAI Codex CLI; workspace-write sandbox, can run tests"},
     "claude": {"work": ["claude", "--permission-mode", "acceptEdits", "--allowedTools", "Read,Edit,Write,Glob,Grep", "-p"],
                "review": ["claude", "--allowedTools", "Read,Grep,Glob", "-p"],
-               "model_flag": "--model", "author": ("Claude Code", "noreply@anthropic.com"),
+               "model_flag": "--model", "effort_flag": ["--effort", "{}"], "author": ("Claude Code", "noreply@anthropic.com"),
                "note": "Claude Code, fresh context; edits only (no shell) unless providers.json allows more"},
     "grok": {"work": ["grok", "--permission-mode", "acceptEdits", "-p"],
              "review": ["grok", "--permission-mode", "plan", "-p"],
@@ -202,7 +202,7 @@ def summary(job: Dict) -> Dict:
         out["escalated"] = ["%s -> %s (round %s)" % (e["from"], e["to"], e["round"]) for e in job["escalations"]]
     if job.get("commit_error"):   # never only inside result(): a refused commit must show in status and wait
         out["commit_error"] = job["commit_error"].strip().splitlines()[-1][:300] + " (see delegate_result)"
-    tried = [a for a in job.get("attempts", []) if a.get("round") == job.get("round") and a.get("outcome") in ("auth", "unavailable", "blocked")]
+    tried = [a for a in job.get("attempts", []) if a.get("round") == job.get("round") and a.get("outcome") in ("auth", "unavailable", "blocked", "stalled")]
     if tried:   # brains this round skipped past (quota / sign-in)
         out["fell_back_from"] = ["%s (%s until %s)" % (a["brain"], a["outcome"], a.get("rested_until", "?")) for a in tried]
     return out
@@ -217,13 +217,15 @@ def with_flags(argv: List[str], flags: List[str]) -> List[str]:
     return argv
 
 
-def command(cli: str, kind: str, cwd: Path, model: str, prompt: str) -> List[str]:
+def command(cli: str, kind: str, cwd: Path, model: str, prompt: str, effort: str = "") -> List[str]:
     spec = PROVIDERS[cli]
     flags: List[str] = []
     if kind == "work" and spec.get("workdir_flag"):
         flags += [spec["workdir_flag"], str(cwd)]
     if model:
         flags += [spec["model_flag"], model]
+    if effort and spec.get("effort_flag"):   # agy has none: its effort is the model's -low/-medium/-high variant
+        flags += [f.format(effort) for f in spec["effort_flag"]]
     argv = with_flags(spec[kind], flags) + [prompt]
     exe = shutil.which(argv[0])
     if not exe:
@@ -242,9 +244,19 @@ def base_env() -> Dict[str, str]:
     return env
 
 
+# opencode's default for anything outside the project is "ask", which headless `opencode run` turns into a
+# rejection that ends the whole run (exit 1, nothing done). "deny" instead hands the model an error and it carries
+# on (observed: a model that went to read ~/.agents/AGENTS.md aborted under "ask", finished the task under "deny").
+# Merged over the operator's own opencode config; providers.json "env" can replace it.
+OPENCODE_HEADLESS = {"permission": {"external_directory": "deny", "question": "deny"}}
+
+
 def agent_env(cli: str, account: str = "default") -> Dict[str, str]:
     env = base_env()
     env.update(B.account_env(cli, account))
+    if cli == "opencode":
+        env.setdefault("OPENCODE_CONFIG_CONTENT", json.dumps(OPENCODE_HEADLESS))
+    env.update({k: str(v) for k, v in (PROVIDERS[cli].get("env") or {}).items()})
     name, email = PROVIDERS[cli]["author"]
     env.update(GIT_AUTHOR_NAME=name, GIT_AUTHOR_EMAIL=email, GIT_COMMITTER_NAME=name, GIT_COMMITTER_EMAIL=email,
                DELEGATE_WORKER="1")
@@ -364,7 +376,7 @@ def make_chain(cli: str = "", model: str = "", chain: Optional[List[str]] = None
     else:
         if cli not in PROVIDERS:
             raise ValueError("unknown cli %r; choose from %s" % (cli, ", ".join(PROVIDERS)))
-        brains = B.chain_for(cli, model, fallback, installed)
+        brains = B.chain_for(cli, model, fallback, installed, difficulty)
     bad = sorted({b["cli"] for b in brains if b["cli"] not in PROVIDERS})
     if bad:
         raise ValueError("unknown cli in chain: %s" % ", ".join(bad))
@@ -372,6 +384,10 @@ def make_chain(cli: str = "", model: str = "", chain: Optional[List[str]] = None
     if off:
         raise ValueError("%s disabled (brains.json `disabled`); remove it there to use it" % ", ".join(off))
     brains = B.expand([b for b in brains if installed(b["cli"])])
+    effort = (B.config().get("effort") or {}).get(difficulty or B.config().get("default_difficulty") or "normal", "")
+    for b in brains:   # CLIs that take reasoning effort as a flag get the difficulty's
+        if effort and PROVIDERS[b["cli"]].get("effort_flag") and not b.get("effort"):
+            b["effort"] = effort
     if not brains:
         raise RuntimeError("none of the chain's CLIs is installed")
     return brains
@@ -432,8 +448,42 @@ def launch(job: Dict) -> Dict:
     return summary(job)
 
 
+def _progress(paths: List[Path]) -> tuple:
+    """A cheap fingerprint of activity: newest mtime and total size over these files and folders (shallow walk,
+    .git skipped). Any write by the worker changes it."""
+    newest, total = 0.0, 0
+    for root in paths:
+        try:
+            if root.is_file():
+                st = root.stat()
+                newest, total = max(newest, st.st_mtime), total + st.st_size
+                continue
+            for dirpath, dirnames, files in os.walk(root):
+                dirnames[:] = [x for x in dirnames if x not in (".git", "node_modules", "__pycache__")]
+                for f in files:
+                    try:
+                        st = os.stat(os.path.join(dirpath, f))
+                    except OSError:
+                        continue
+                    newest, total = max(newest, st.st_mtime), total + st.st_size
+        except OSError:
+            continue
+    return newest, total
+
+
+def _watch_paths(b: Dict, cwd: Path, logs: List[Path]) -> List[Path]:
+    """Where a running brain leaves traces: its logs, the worktree, and the CLI's own log folder (agy prints
+    nothing until it is done, but writes its log as it works)."""
+    out = logs + [cwd]
+    if b["cli"] == "agy":
+        home = Path(B.account_env("agy", b["account"]).get("HOME") or B.USER_HOME)
+        out.append(home / ".gemini" / "antigravity-cli" / "log")
+    return out
+
+
 def _spawn(jid: str, argv: List[str], cwd: Path, b: Dict, stem: str, timeout: int) -> tuple:
-    """Run one brain to its end. (exit code, error text)."""
+    """Run one brain to its end. (exit code, error text). Stopped early when it makes no progress for
+    `stall_sec` (error starts with "stalled")."""
     d = job_dir(jid)
     with open(d / ("stdout.%s.log" % stem), "wb") as out, open(d / ("stderr.%s.log" % stem), "wb") as err:
         kw = {"creationflags": 0x08000000} if IS_WIN else {"start_new_session": True}
@@ -444,12 +494,27 @@ def _spawn(jid: str, argv: List[str], cwd: Path, b: Dict, stem: str, timeout: in
         job = load(jid)
         job["agent_pid"] = p.pid
         save(job)
-        try:
-            return p.wait(timeout=timeout), ""
-        except subprocess.TimeoutExpired:
-            kill_tree(p.pid)
-            p.wait(30)
-            return -1, "timed out after %ss" % timeout
+        stall = int(B.config().get("stall_sec") or 0)
+        watch = _watch_paths(b, cwd, [d / ("stdout.%s.log" % stem), d / ("stderr.%s.log" % stem)])
+        start = last_change = time.time()
+        seen = _progress(watch)
+        while True:
+            try:
+                return p.wait(timeout=min(10, stall / 3 if stall else 10, max(1, timeout - (time.time() - start)))), ""
+            except subprocess.TimeoutExpired:
+                pass
+            now_ = time.time()
+            if now_ - start >= timeout:
+                kill_tree(p.pid)
+                p.wait(30)
+                return -1, "timed out after %ss" % timeout
+            cur = _progress(watch)
+            if cur != seen:
+                seen, last_change = cur, now_
+            elif stall and now_ - last_change >= stall:
+                kill_tree(p.pid)
+                p.wait(30)
+                return -1, "stalled: no output, file or log change for %ds" % int(now_ - last_change)
 
 
 def run_check(job: Dict, command: str = "", timeout: int = 1800) -> Dict:
@@ -544,7 +609,7 @@ def _round(jid: str) -> int:
             else:
                 cwd = d / "room"
                 prompt = REVIEW_PROMPT.format(brief="REVIEW.md")
-            argv = command(b["cli"], job["kind"], cwd, b["model"], prompt)
+            argv = command(b["cli"], job["kind"], cwd, b["model"], prompt, b.get("effort", ""))
             job = load(jid)
             stem = "r%d.a%d" % (rnd, len(job.get("attempts", [])) + 1)
             job.update(cli=b["cli"], model=b["model"], account=b["account"], log=stem, argv=argv[:-1] + ["<prompt>"])
@@ -567,12 +632,13 @@ def _round(jid: str) -> int:
                 made = bool(git(cwd, "status", "--porcelain", check=False)) or (cwd / BRIEF_DIR / "REPORT.md").exists()
             else:
                 made = "VERDICT" in text
-            outcome = "failed" if error else B.classify(code, text, made)
+            outcome = ("stalled" if error.startswith("stalled") else "failed") if error else B.classify(code, text, made)
             attempt = {"round": rnd, "brain": B.label(b), "exit_code": code, "outcome": outcome, "log": stem,
                        "at": now(), "agent_sec": agent_sec}
-            if outcome in ("auth", "unavailable", "blocked"):
+            if outcome in ("auth", "unavailable", "blocked", "stalled"):
                 long_rest = outcome in ("auth", "blocked")
-                until = B.rest(b, outcome, text[-3000:], cfg["auth_rest_sec"] if long_rest else None)
+                until = B.rest(b, outcome, error if outcome == "stalled" else text[-3000:],
+                               cfg["auth_rest_sec"] if long_rest else B.UNKNOWN_REST if outcome == "stalled" else None)
                 attempt["rested_until"] = datetime.fromtimestamp(until).isoformat(timespec="minutes")
                 if outcome == "auth":
                     attempt["login"] = B.login_guide(b["cli"], b["account"])
@@ -587,8 +653,11 @@ def _round(jid: str) -> int:
                 save(job)
                 if outcome == "blocked":
                     RT.record(RT.key(b), job.get("difficulty", ""), "blocked", jid)
+                if outcome == "stalled" and work:
+                    RT.record(RT.key(b), job.get("difficulty", ""), "failed", jid, agent_sec=agent_sec, why="stalled")
                 handover = "%s %s" % (B.label(b), {"auth": "was not signed in", "unavailable": "ran out of quota",
-                                                   "blocked": "was blocked by its permission mode"}[outcome])
+                                                   "blocked": "was blocked by its permission mode",
+                                                   "stalled": "got stuck (no progress) and was stopped"}[outcome])
                 continue
             job.setdefault("attempts", []).append(attempt)
             if outcome == "failed" and work:

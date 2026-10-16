@@ -26,9 +26,12 @@ Leave `cli` empty and set `difficulty`; the tier decides who starts and who take
 
 | difficulty | use for | chain (cheapest first) |
 |---|---|---|
-| `easy` | mechanical edits, renames, docs, simple tests, single-file changes with a clear check | opencode → agy Gemini (medium) → agy Gemini (high) |
-| `normal` (default) | typical feature/bug work in a few files with tests | opencode → agy Gemini → agy Claude group |
-| `hard` | cross-module design, subtle concurrency/security, unclear failure modes | agy Claude group → agy Gemini |
+| `easy` | mechanical edits, renames, docs, simple tests, single-file changes with a clear check | opencode free → agy Gemini Flash low → medium → high |
+| `normal` (default) | typical feature/bug work in a few files with tests | opencode free → Flash high → Sonnet → Opus → Argon (medium) |
+| `hard` | cross-module design, subtle concurrency/security, unclear failure modes | Argon → Opus → Sonnet (high) → Flash high |
+
+Models and effort are picked from the live `agy models` / `opencode models` lists (`delegate_chain(difficulty=...)` shows the
+exact rungs); a new model joins by itself. Stuck workers (no progress for 4 min) are stopped and passed on.
 
 When a worker cannot make `check` pass after its automatic fix rounds, or fails outright, the next brain takes over
 the same worktree — no tokens of yours spent. Quota, sign-in and permission stops fall through the same chain.

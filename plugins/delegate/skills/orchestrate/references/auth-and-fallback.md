@@ -9,7 +9,8 @@ A **brain** is `cli:model@account`. Every job runs down a **chain** of brains: a
 |---|---|---|
 | quota / rate limit / outage | "429", "usage limit", "resets in 2h5m", 5xx … | its quota group rests until the reset (15 min if none given) |
 | not signed in | "not logged in", "401", "OAuth … expired" … | its sign-in window opens on this machine; rests until signed in (6 h max); when the whole chain is out, the job waits for the sign-in (`phase: waiting_login`, up to `login_wait_sec`) and carries on |
-| blocked by its permission mode | "headless mode cannot prompt … auto-denied" (exit 0, nothing done) | rests 6 h; fix the permissions or let others do it |
+| blocked by its permission mode | "headless mode cannot prompt … auto-denied" (exit 0, nothing done) | rests 6 h; rare now: workers get explicit denies, which they work around |
+| stuck | no change in its logs, worktree or agy's own log for `stall_sec` (4 min) | stopped; its quota group rests 15 min; next brain takes over |
 | failed (exit ≠ 0) | anything else | next brain takes over (no rest) |
 | check still failing after its automatic rounds | the job's `check` | **escalates** to the next brain (rated `escalated`) |
 
@@ -25,7 +26,7 @@ the old account's rests are remembered for when it comes back.
 | CLI | Sign-in | Notes |
 |---|---|---|
 | opencode | none needed | without a model: its best free built-in models (`opencode_prefer`, top `opencode_free_top`), one quota rest each; always `--standalone` so it works in the worktree |
-| agy | Google account, token file per account home | extra accounts with `delegate_login("agy", name)` (below) |
+| agy | Google account, token file per account home | workers run in `accounts/agy/default` (seeded with the operator's token, settings deny shell commands); extra accounts with `delegate_login("agy", name)` |
 | claude | `claude auth login` | spends Claude quota; never automatic |
 | codex, grok | — | disabled (no subscription); implemented, enable in `brains.json` |
 

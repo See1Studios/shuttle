@@ -27,8 +27,23 @@ class AgyFileAuth(unittest.TestCase):
         B.CONFIG, B.ACCOUNTS = self.saved
 
     def test_default_account_uses_the_file_store(self):
+        B.CONFIG.write_text(json.dumps({"agy_worker_home": False}), encoding="utf-8")
         self.assertEqual(B.account_env("agy", "default"), {"SSH_CONNECTION": "local"})
         self.assertEqual(D.agent_env("agy")["SSH_CONNECTION"], "local")
+
+    def test_default_workers_get_their_own_home_with_deny_rules(self):
+        env = B.account_env("agy", "default")
+        home = B.ACCOUNTS / "agy" / "default"
+        self.assertEqual((env["HOME"], env["USERPROFILE"], env["SSH_CONNECTION"]), (str(home), str(home), "local"))
+        settings = json.loads((home / ".gemini" / "antigravity-cli" / "settings.json").read_text(encoding="utf-8"))
+        self.assertEqual(settings["permissions"], {"deny": ["command(*)"]})
+        self.assertEqual(B.accounts("agy"), ["default"])   # the worker home is not listed as another account
+
+    def test_named_accounts_get_the_worker_permissions_too(self):
+        B.add_account("agy", "work9")
+        env = B.account_env("agy", "work9")
+        settings = json.loads((Path(env["HOME"]) / ".gemini" / "antigravity-cli" / "settings.json").read_text(encoding="utf-8"))
+        self.assertIn("command(*)", settings["permissions"]["deny"])
 
     def test_other_clis_are_untouched(self):
         self.assertNotIn("SSH_CONNECTION", B.account_env("codex", "default"))
@@ -51,7 +66,7 @@ class AgyFileAuth(unittest.TestCase):
         self.assertIn("SSH_CONNECTION", B.login_command("agy", "default"))
 
     def test_switch_off_restores_the_credential_store(self):
-        B.CONFIG.write_text(json.dumps({"agy_file_auth": False}), encoding="utf-8")
+        B.CONFIG.write_text(json.dumps({"agy_file_auth": False, "agy_worker_home": False}), encoding="utf-8")
         self.assertEqual(B.account_env("agy", "default"), {})
         if B.IS_WIN:
             with self.assertRaises(ValueError):

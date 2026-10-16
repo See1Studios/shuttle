@@ -58,11 +58,18 @@ CLI without Claude: `python plugins/delegate/scripts/delegate.py --help` — `st
 
 ## Routing, escalation, ratings
 
-| difficulty | chain |
+| difficulty | chain (built from the live model lists) |
 |---|---|
-| easy | opencode -> agy Gemini medium -> agy Gemini high |
-| normal (default) | opencode -> agy Gemini high -> agy Claude Sonnet |
-| hard | agy Claude Sonnet -> agy Gemini high |
+| easy | opencode free x3 -> agy Gemini Flash low -> medium -> high |
+| normal (default) | opencode free x3 -> agy Gemini Flash high -> Claude Sonnet -> Claude Opus -> Gemini Argon (medium) |
+| hard | agy Gemini Argon -> Claude Opus -> Claude Sonnet (high) -> Gemini Flash high |
+
+The agy rungs come from `agy models` (re-read every 6 h, so a new model needs no edit), ranked smartest first by
+`agy_rank` (argon > opus > sonnet > flash; newest version of each), with the effort variant by difficulty
+(`effort`: easy low, normal medium, hard high). Quota pools: argon, gemini, claude-gpt. opencode's free models come
+from `opencode models`, ordered by `opencode_prefer` (space-bunny first: fastest in a test-backed bake-off). A
+`tiers` entry in `brains.json` still replaces a tier; claude / codex get the effort as a flag. The dashboard shows
+the ranking and the chains.
 
 - With a `check`, the runner runs it after each round; on failure the same worker gets the output and retries
   (`auto_fix_rounds`, default 2), then the job **escalates** to the next brain in the same worktree.
@@ -91,14 +98,20 @@ Defaults are each CLI's restricted headless mode; the plugin never widens them:
 
 | CLI | Default command | Shell? |
 |---|---|---|
-| opencode | `run --standalone` (its own permission config) | per config |
-| agy | `agy-real --sandbox --mode accept-edits -p` | no: headless shell is auto-denied, and agy stops at its first command (detected as `blocked`) |
+| opencode | `run --standalone`, plus `OPENCODE_CONFIG_CONTENT` denying `external_directory` and `question` | per config; outside the worktree: denied |
+| agy | `agy-real --sandbox --mode accept-edits -p`, in a worker home whose settings deny `command(*)` | no: denied, and it carries on (edits; the job's `check` runs the tests) |
 | claude | `--permission-mode acceptEdits --allowedTools Read,Edit,Write,Glob,Grep -p` | no |
 | codex | `exec -s workspace-write` | yes, sandboxed to the worktree |
 | grok | `--permission-mode acceptEdits -p` | no |
 
-To give agy what it needs, the operator either adds allow rules to agy's `settings.json` (`permissions.allow`, e.g.
-`command(python)`, `command(git)`), or overrides its command in `~/.claude-delegate/providers.json`:
+Why the denies: in headless mode a tool that would need to *ask* is auto-rejected and the whole run ends with
+nothing done (agy: `blocked`; opencode: exit 1). An explicit **deny** instead hands the model an error and it
+carries on; verified for both. agy reads permissions only from `$HOME/.gemini/antigravity-cli/settings.json`, so its
+workers run in `~/.claude-delegate/accounts/agy/default/` (the operator's settings + `agy_permissions`, seeded with
+the operator's login token; the operator's own agy settings are never touched). A deny beats any allow there, so
+`agy_permissions` is all-or-nothing per rule. `"agy_worker_home": false` in `brains.json` goes back to the
+operator's home. A worker that shows no progress (logs, worktree, agy's own log) for `stall_sec` (4 min) is stopped
+and the next brain takes over. Other overrides go in `~/.claude-delegate/providers.json`:
 
 ```json
 {
