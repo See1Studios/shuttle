@@ -89,6 +89,9 @@ DEFAULTS = {
     # that went silent mid-task and sat there 15+ min). It is stopped, its quota group rests 15 min, and the next
     # brain takes over. 0 turns this off (only the job timeout then).
     "stall_sec": 4 * 60,
+    # Starting a job brings up the management dashboard (http://127.0.0.1:8765/) and opens it in the browser the
+    # first time it is started; later jobs only return its url.
+    "dashboard_on_start": True,
     # opencode without a model runs its free built-in models (no sign-in): the first `opencode_free_top` of
     # `opencode models`' opencode/* list, those matching `opencode_prefer` first, each with its own quota rest.
     # Measured on one test-backed task (2026-10-16): space-bunny 68 s, deepseek 124 s, mimo 141 s, longcat 440 s,

@@ -11,6 +11,7 @@ import unittest
 from pathlib import Path
 
 os.environ.setdefault("DELEGATE_HOME", tempfile.mkdtemp(prefix="delegate-test-"))
+os.environ["DELEGATE_NO_DASHBOARD"] = "1"
 SCRIPTS = Path(os.environ.get("DELEGATE_SCRIPTS") or Path(__file__).resolve().parents[1] / "scripts")
 sys.path.insert(0, str(SCRIPTS))
 import brains as B  # noqa: E402

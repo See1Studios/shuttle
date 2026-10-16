@@ -14,6 +14,7 @@ from pathlib import Path
 
 TMP = tempfile.mkdtemp(prefix="delegate-test-")
 os.environ["DELEGATE_HOME"] = str(Path(TMP) / "home")
+os.environ["DELEGATE_NO_DASHBOARD"] = "1"
 SCRIPTS = Path(os.environ.get("DELEGATE_SCRIPTS") or Path(__file__).resolve().parents[1] / "scripts")
 sys.path.insert(0, str(SCRIPTS))
 import delegate as D  # noqa: E402

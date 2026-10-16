@@ -69,7 +69,9 @@ the check at it. `auto_fix_rounds` (default 2) is per worker before it escalates
 
 - `delegate_start(task, repo, difficulty=..., check=..., title=...)`; one call per parallel piece.
   `delegate_compete` only when the choice really matters: it doubles what you review.
-- One line to the operator with the job ids, then `delegate_wait(ids, timeout_sec=600)` (compact states). Don't
+- One line to the operator with the job ids and the `dashboard` link from the start result (the job brings the
+  dashboard up itself; in the Claude desktop app also open that link in the browser pane so it sits beside the chat),
+  then `delegate_wait(ids, timeout_sec=600)` (compact states). Don't
   poll `delegate_status` in between; don't narrate waits.
 - Once per session before the first job, or when a job reports `needs_login` / `phase: waiting_login`:
   `delegate_auth()` — it opens the sign-in window of each worker missing one; tell the operator to finish it there

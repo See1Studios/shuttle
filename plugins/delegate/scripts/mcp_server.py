@@ -39,7 +39,9 @@ def delegate_start(task: str, repo: str, difficulty: str = "normal", check: str 
     (cli[:model][@account]). See delegate_chain for what would be tried.
     `check`: an acceptance command (e.g. "py -3 -m pytest -q tests/test_x.py") the runner executes in the worktree
     after each round; while it fails, the worker gets its output and retries, up to auto_fix_rounds, without you.
-    Always give one when the task is testable: it is the cheapest review there is."""
+    Always give one when the task is testable: it is the cheapest review there is.
+    The result carries `dashboard` (the local management page, brought up and opened on the first job): give the
+    operator that link with the job id."""
     return d.start(cli, task, repo=repo, title=title, model=model, base=base, timeout=timeout_sec,
                    chain=chain or None, fallback=fallback, check=check, auto_fix=auto_fix_rounds,
                    difficulty=difficulty)

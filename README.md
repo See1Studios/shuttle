@@ -49,7 +49,8 @@ After changing files here: `claude plugin update delegate@claude-delegate`, then
 - `/delegate-auth` — sign-in state; opens sign-in where missing; agy account swap.
 - `python plugins/delegate/scripts/delegate.py dashboard` (or the `delegate_dashboard` tool) — management page at
   `http://127.0.0.1:8765/`: who is signed in (a 로그인 button opens that CLI's sign-in window), resting quota groups
-  (clear them), opencode's free models, the difficulty chains, and the jobs (cancel / discard).
+  (clear them), opencode's free models, the difficulty chains, and the jobs (cancel / discard). Starting a job brings
+  it up and opens it in the browser the first time (`dashboard_on_start`); the start result carries its url.
 - Or just ask: "이건 opencode/agy한테 맡기고 결과만 검토해줘".
 
 CLI without Claude: `python plugins/delegate/scripts/delegate.py --help` — `start --difficulty normal --check "..."`,

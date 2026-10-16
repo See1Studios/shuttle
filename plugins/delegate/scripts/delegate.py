@@ -424,7 +424,25 @@ def start(cli: str, task: str, repo: str = ".", title: str = "", model: str = ""
     d.mkdir(parents=True, exist_ok=True)
     (d / "task.md").write_text(task, encoding="utf-8")
     save(job)
-    return launch(job)
+    out = launch(job)
+    url = show_dashboard()
+    if url:
+        out["dashboard"] = url
+    return out
+
+
+def show_dashboard() -> str:
+    """Bring the dashboard up for a new job; open the browser only when it was not running yet. "" when off."""
+    if not B.config().get("dashboard_on_start", True) or os.environ.get("DELEGATE_NO_DASHBOARD"):
+        return ""
+    try:
+        up = dashboard(open_browser=False)
+        if not up["already_running"]:
+            import webbrowser
+            webbrowser.open(up["url"])
+        return up["url"]
+    except Exception:  # noqa: BLE001 - the job matters, the dashboard does not
+        return ""
 
 
 def start_many(clis_: List[str], task: str, **kw) -> List[Dict]:
