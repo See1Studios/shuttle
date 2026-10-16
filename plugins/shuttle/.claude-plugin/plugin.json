@@ -1,0 +1,7 @@
+{
+  "name": "shuttle",
+  "version": "0.3.0",
+  "description": "Director mode: shuttle coding tasks to cheaper agent CLIs in isolated git worktrees, review their diffs in tiers, request rework, and land the result.",
+  "author": { "name": "Jongwoo Park" },
+  "keywords": ["shuttle", "delegation", "orchestration", "worktree", "codex", "claude", "grok", "gemini", "opencode", "review"]
+}

@@ -1,0 +1,12 @@
+{
+  "name": "shuttle",
+  "displayName": "Shuttle",
+  "version": "0.3.0",
+  "description": "Director mode: shuttle coding tasks to cheaper agent CLIs in isolated git worktrees, review their diffs in tiers, request rework, and land the result.",
+  "logo": "assets/logo.svg",
+  "suggestedPrompts": [
+    "Shuttle a normal task to implement this feature with tests",
+    "Show active shuttle jobs and review finished ones",
+    "Check worker CLI sign-in status and quota rests"
+  ]
+}

@@ -1,12 +1,12 @@
 {
-  "name": "claude-delegate",
+  "name": "shuttle",
   "owner": { "name": "Jongwoo Park" },
-  "metadata": { "description": "Make Claude a director that delegates coding work to other agent CLIs and reviews the result." },
+  "metadata": { "description": "Make any coding agent a director that shuttles coding work to worker agent CLIs in isolated git worktrees and reviews the result." },
   "plugins": [
     {
-      "name": "delegate",
-      "source": "./plugins/delegate",
-      "description": "Delegate tasks to codex / claude / grok / agy / opencode in isolated git worktrees, review the diff, request rework, land it."
+      "name": "shuttle",
+      "source": "./plugins/shuttle",
+      "description": "Shuttle tasks to opencode / agy / codex / claude / grok in isolated git worktrees, review the diff, request rework, land it."
     }
   ]
 }

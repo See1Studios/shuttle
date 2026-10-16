@@ -1,0 +1,27 @@
+{
+  "name": "shuttle",
+  "owner": {
+    "name": "Jongwoo Park"
+  },
+  "interface": {
+    "displayName": "Shuttle Marketplace"
+  },
+  "metadata": {
+    "description": "Make any coding agent a director that shuttles coding work to worker agent CLIs in isolated git worktrees and reviews the result."
+  },
+  "plugins": [
+    {
+      "name": "shuttle",
+      "source": {
+        "source": "local",
+        "path": "./plugins/shuttle"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity",
+      "description": "Shuttle tasks to opencode / agy / codex / claude / grok in isolated git worktrees, review the diff, request rework, and land it."
+    }
+  ]
+}

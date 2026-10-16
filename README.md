@@ -1,61 +1,70 @@
-# claude-delegate
+# shuttle
 
-A Claude Code plugin that turns Claude into a **director that spends as few of its own tokens as possible**. Claude
-writes a brief and an acceptance check; cheaper agent CLIs do the work headless in isolated git worktrees, routed by
-difficulty and by their track record; a runner tests, retries and escalates without Claude; Claude reads only the
-verdict and what is risky, then lands the result. Modelled on PrivateEngine's worktree delegation
+A multi-agent plugin (`shuttle`, for **Claude Code**, **OpenAI Codex**, **Antigravity (`agy` & IDE)**, **Grok Build**,
+and **OpenCode**) that turns your coding agent into a **director that spends as few of its own tokens as possible**.
+The director writes a brief and an acceptance check; cheaper worker CLIs do the work headless in isolated git worktrees,
+routed by difficulty and by their track record; a runner tests, retries and escalates without the director; the director
+reads only the verdict and what is risky, then lands the result. Modelled on PrivateEngine's worktree runner
 (`engine/dev/worktree_runner.py`, `tools/brain_limits.py`, `providers/account_login.py`), without its ticket governance.
 
 ```
-Claude: brief + check ──> runner ──> opencode (free) ──check fails──> agy Gemini ──> agy Claude group
-                                        │  quota / not signed in / blocked -> next brain, same worktree
-          verdict, diffstat, report <───┘  ratings.jsonl learns who passes what -> routing skips proven-weak brains
-Claude: tiered review (machine -> shape -> worker 2nd opinion -> targeted read) -> merge (one hooked commit) | rework | discard
+Director: brief + check ──> runner ──> opencode (free) ──check fails──> agy Gemini ──> agy Claude group
+                                         │  quota / not signed in / blocked -> next brain, same worktree
+            verdict, diffstat, report <──┘  ratings.jsonl learns who passes what -> routing skips proven-weak brains
+Director: tiered review (machine -> shape -> worker 2nd opinion -> targeted read) -> merge (one hooked commit) | rework | discard
 ```
 
 ## Parts
 
 | Part | Path | What it does |
 |---|---|---|
-| Runner + CLI | `plugins/delegate/scripts/delegate.py` | worktrees, background jobs, briefs, check/auto-fix/escalate loop, lean results, rework, second-opinion reviews, merge/discard |
-| Brains | `plugins/delegate/scripts/brains.py` | difficulty tiers, fallback chains, quota-group rests, sign-in checks, accounts |
-| Ratings | `plugins/delegate/scripts/ratings.py` | per model x difficulty scores from outcomes and director verdicts; routing that skips proven-weak brains |
-| agy account swap | `plugins/delegate/scripts/agy_login.py` | `/logout` -> Google OAuth link -> pasted code, in a pseudo console |
-| Dashboard | `plugins/delegate/scripts/dashboard.py` | local page: sign-ins with a login button, rests, free models, chains, jobs |
-| MCP server | `plugins/delegate/scripts/mcp_server.py` | the same operations as `delegate_*` tools |
-| Skill | `plugins/delegate/skills/orchestrate/` | the token-saving director procedure, review checklist, sign-in & fallback guide |
-| Commands | `plugins/delegate/commands/` | `/delegate`, `/delegations`, `/delegate-auth` |
+| Runner + CLI | `plugins/shuttle/scripts/shuttle.py` | worktrees, background jobs, briefs, check/auto-fix/escalate loop, lean results, rework, second-opinion reviews, merge/discard, host installer |
+| Brains | `plugins/shuttle/scripts/brains.py` | difficulty tiers, fallback chains, quota-group rests, sign-in checks, accounts |
+| Ratings | `plugins/shuttle/scripts/ratings.py` | per model x difficulty scores from outcomes and director verdicts; routing that skips proven-weak brains |
+| agy account swap | `plugins/shuttle/scripts/agy_login.py` | `/logout` -> Google OAuth link -> pasted code, in a pseudo console |
+| Dashboard | `plugins/shuttle/scripts/dashboard.py` | local page: sign-ins with a login button, rests, free models, chains, jobs |
+| MCP server | `plugins/shuttle/scripts/mcp_server.py` | the same operations as `shuttle_*` tools on MCP server `shuttle` (automatically hidden inside worker processes) |
+| Skills | `plugins/shuttle/skills/` | `orchestrate` (token-saving director procedure), `/shuttle`, `/shuttles`, `/shuttle-auth` |
+| Plugin manifests | `plugins/shuttle/{plugin.json,.claude-plugin,.codex-plugin}` | native manifests and MCP configs for Claude Code, Codex, Antigravity, Grok Build, and OpenCode |
 
 ## Install
 
 Requirements: Python 3.10+, `pip install mcp pywinpty` (mcp 1.x or 2.x; pywinpty only for the agy account swap),
 git, and the worker CLIs on `PATH`.
 
-```bash
-claude plugin marketplace add C:/Users/user/Documents/GitHub/claude-delegate
-```
+Install or update `shuttle` across **all installed coding agents** on this machine with one command:
 
 ```bash
-claude plugin install delegate@claude-delegate
+python plugins/shuttle/scripts/shuttle.py install
 ```
 
-After changing files here: `claude plugin update delegate@claude-delegate`, then start a new session.
+Or install per agent (`python plugins/shuttle/scripts/shuttle.py install claude|codex|agy|grok|opencode`), or using
+each agent's native plugin manager:
+
+- **Claude Code**: `claude plugin marketplace add . && claude plugin install shuttle@shuttle`
+  (after edits: `claude plugin update shuttle@shuttle`)
+- **OpenAI Codex**: `codex plugin marketplace add . && codex plugin add shuttle@shuttle`
+- **Antigravity (`agy` CLI & IDE)**: `agy-real plugin install ./plugins/shuttle --force`
+  (also auto-discovered in this workspace via `.agents/plugins.json`)
+- **Grok Build**: `grok plugin install ./plugins/shuttle --trust` (enabled in `~/.grok/config.toml`)
+- **OpenCode**: `shuttle.py install opencode` registers the MCP server in `~/.config/opencode/opencode.json` and
+  installs the skills into `~/.config/opencode/skills/`.
 
 ## Use
 
-- `/delegate normal add retry with backoff to the HTTP client` — Claude writes the brief and check, routes by
+- `/shuttle normal add retry with backoff to the HTTP client` — the director writes the brief and check, routes by
   difficulty, reviews in tiers, asks before landing.
-- `/delegations` — jobs; `/delegations <id> review|merge|discard|followup <feedback>`.
-- `/delegate-auth` — sign-in state; opens sign-in where missing; agy account swap.
-- `python plugins/delegate/scripts/delegate.py dashboard` (or the `delegate_dashboard` tool) — management page at
+- `/shuttles` — jobs; `/shuttles <id> review|merge|discard|followup <feedback>`.
+- `/shuttle-auth` — sign-in state; opens sign-in where missing; agy account swap.
+- `python plugins/shuttle/scripts/shuttle.py dashboard` (or the `shuttle_dashboard` tool) — management page at
   `http://127.0.0.1:8765/`: who is signed in (a 로그인 button opens that CLI's sign-in window), resting quota groups
   (clear them), opencode's free models, the difficulty chains, and the jobs (cancel / discard). Starting a job brings
   it up and opens it in the browser the first time (`dashboard_on_start`); the start result carries its url.
 - Or just ask: "이건 opencode/agy한테 맡기고 결과만 검토해줘".
 
-CLI without Claude: `python plugins/delegate/scripts/delegate.py --help` — `start --difficulty normal --check "..."`,
-`wait`, `result [--paths a,b]`, `check`, `followup`, `review`, `merge`, `discard`, `chain`, `ratings`, `limits`,
-`auth [--open]`, `login`, `agy-switch`, `dashboard`.
+CLI without an agent: `python plugins/shuttle/scripts/shuttle.py --help` — `install [agent]`,
+`start --difficulty normal --check "..."`, `wait`, `result [--paths a,b]`, `check`, `followup`, `review`, `merge`,
+`discard`, `chain`, `ratings`, `limits`, `auth [--open]`, `login`, `agy-switch`, `dashboard`.
 
 ## Routing, escalation, ratings
 
@@ -78,7 +87,7 @@ the ranking and the chains.
 - `ratings.jsonl` records per model and difficulty: passed (minus a little per automatic round), escalated, failed,
   and the director's accepted (merge) / rework (followup) / rejected (discard). Score = Laplace-smoothed success
   rate. Routing skips a brain with >= 4 events and score < 0.35 at that difficulty, except 15% of the time
-  (exploration). `delegate.py ratings` shows the table.
+  (exploration). `shuttle.py ratings` shows the table.
 - codex and grok are implemented but **disabled** (`brains.json` `disabled`). The claude CLI is never automatic.
 
 ## Sign-in and accounts
@@ -89,9 +98,9 @@ limit on one moves to the next. A worker that turns out signed out gets its own 
 machine (at most once per `login_prompt_sec`, 15 min); when nothing else in the chain can work, the job waits up to
 `login_wait_sec` (15 min) for that sign-in and then carries on (`phase: waiting_login`). agy runs with `SSH_CONNECTION=local`, so its login is a token file under its
 home rather than the Windows credential store: sign-in is a link to click, and extra agy accounts run side by side
-like the other CLIs' (`brains.json` `"agy_file_auth": false` turns this off; then `delegate.py agy-switch` swaps
+like the other CLIs' (`brains.json` `"agy_file_auth": false` turns this off; then `shuttle.py agy-switch` swaps
 the single login). The token file is plain, readable by this Windows user's processes. claude / codex / grok support
-extra accounts through per-account config folders. Guide: `plugins/delegate/skills/orchestrate/references/auth-and-fallback.md`.
+extra accounts through per-account config folders. Guide: `plugins/shuttle/skills/orchestrate/references/auth-and-fallback.md`.
 
 ## Worker permissions (safety)
 
@@ -108,7 +117,7 @@ Defaults are each CLI's restricted headless mode; the plugin never widens them:
 Why the denies: in headless mode a tool that would need to *ask* is auto-rejected and the whole run ends with
 nothing done (agy: `blocked`; opencode: exit 1). An explicit **deny** instead hands the model an error and it
 carries on; verified for both. agy reads permissions only from `$HOME/.gemini/antigravity-cli/settings.json`, so its
-workers run in `~/.claude-delegate/accounts/agy/default/` (the operator's settings + `agy_permissions`, seeded with
+workers run in `~/.shuttle/accounts/agy/default/` (the operator's settings + `agy_permissions`, seeded with
 the operator's login token; the operator's own agy settings are never touched). A deny beats any allow there, so
 `agy_permissions` is all-or-nothing per rule. `"agy_worker_home": false` in `brains.json` goes back to the
 operator's home. A worker that shows no progress (logs, worktree, agy's own log) for `stall_sec` (4 min) is stopped
@@ -118,7 +127,7 @@ YOLO (opt-in): `"agy_yolo": true` runs agy workers with `--dangerously-skip-perm
 what fails themselves. Verified: deny rules still hold in that mode (`agy_yolo_deny`: rm/del/Remove-Item, git
 push/reset/clean/checkout, curl/wget, ssh, installs …), but `--sandbox` does not keep writes inside the worktree
 and an interpreter (`python -c …`) can do whatever a denied command could. Use it only where that is acceptable.
-Other overrides go in `~/.claude-delegate/providers.json`:
+Other overrides go in `~/.shuttle/providers.json`:
 
 ```json
 {
@@ -140,6 +149,6 @@ refuses while the operator's tree has uncommitted tracked changes; workers never
 
 ## State
 
-`~/.claude-delegate/` (or `$DELEGATE_HOME`): `jobs/<id>/` (job.json with attempts, checks, timings; task.md;
+`~/.shuttle/` (or `$SHUTTLE_HOME`): `jobs/<id>/` (job.json with attempts, checks, timings; task.md;
 per-attempt logs), `worktrees/<id>/`, `accounts/`, `limits.json`, `ratings.jsonl`, `agy-room/`, optional
-`brains.json` and `providers.json`. `/.delegate/` and tool caches are kept out of commits via `.git/info/exclude`.
+`brains.json` and `providers.json`. `/.shuttle/` and tool caches are kept out of commits via `.git/info/exclude`.
