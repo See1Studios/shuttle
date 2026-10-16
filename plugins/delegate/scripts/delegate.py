@@ -371,7 +371,7 @@ def make_chain(cli: str = "", model: str = "", chain: Optional[List[str]] = None
     off = sorted({b["cli"] for b in brains} & B.disabled())
     if off:
         raise ValueError("%s disabled (brains.json `disabled`); remove it there to use it" % ", ".join(off))
-    brains = [b for b in brains if installed(b["cli"])]
+    brains = B.expand([b for b in brains if installed(b["cli"])])
     if not brains:
         raise RuntimeError("none of the chain's CLIs is installed")
     return brains
@@ -576,6 +576,9 @@ def _round(jid: str) -> int:
                 attempt["rested_until"] = datetime.fromtimestamp(until).isoformat(timespec="minutes")
                 if outcome == "auth":
                     attempt["login"] = B.login_guide(b["cli"], b["account"])
+                    opened = B.prompt_login(b["cli"], b["account"], base_env())
+                    if opened and opened.get("opened_window"):
+                        attempt["login_window"] = "opened %s's sign-in window on this machine" % b["cli"]
                 if outcome == "blocked":
                     attempt["permission"] = ("%s stopped at a tool its headless permission mode may not use. Allow "
                                              "what it needs (see README: worker permissions) or leave it to the "
@@ -609,9 +612,26 @@ def _round(jid: str) -> int:
             break
         else:
             job = load(jid)
+            signed_out = [b for b in job["chain"][job.get("chain_pos", 0):] if (B.resting(b) or {}).get("kind") == "auth"]
             logins = sorted({a["login"] for a in job.get("attempts", []) if a.get("login")} |
-                            {B.login_guide(b["cli"], b["account"]) for b in job["chain"]
-                             if (B.resting(b) or {}).get("kind") == "auth"})
+                            {B.login_guide(b["cli"], b["account"]) for b in signed_out})
+            wait = int(cfg.get("login_wait_sec") or 0)
+            if signed_out and wait > 0:   # everything else is out: open the sign-in and carry on once it lands
+                env = base_env()
+                for b in signed_out:
+                    B.prompt_login(b["cli"], b["account"], env)
+                job.update(phase="waiting_login", needs_login=logins)
+                save(job)
+                back = B.wait_for_login(signed_out, env, wait, stop=lambda: load(jid).get("status") == "cancelled")
+                job = load(jid)
+                job.pop("phase", None)
+                if job.get("status") == "cancelled":
+                    return 0
+                if back:
+                    job.pop("needs_login", None)
+                    job.setdefault("warnings", []).append("waited for %s to be signed in, then carried on" % B.label(back))
+                    save(job)
+                    return _round(jid)
             job.update(status="failed", error="every brain in the chain is out of quota or not signed in: "
                        + "; ".join("%s until %s" % (r["group"], r["until"]) for r in B.limits()))
             if logins:
@@ -866,8 +886,9 @@ def discard(jid: str) -> Dict:
 
 # ------------------------------------------------------------------ accounts, sign-in, chains
 
-def auth(cli: str = "") -> List[Dict]:
-    """Sign-in state of every account of every installed CLI (or one CLI), with the login command where missing."""
+def auth(cli: str = "", open_login: bool = False) -> List[Dict]:
+    """Sign-in state of every account of every installed CLI (or one CLI), with the login command where missing.
+    `open_login`: also open the sign-in window of each one missing (claude only when named: it never runs unasked)."""
     names = [cli] if cli else [c for c in PROVIDERS if installed(c) and c not in B.disabled()]
     env = base_env()
     out = []
@@ -876,7 +897,12 @@ def auth(cli: str = "") -> List[Dict]:
             out.append({"cli": c, "account": "default", "logged_in": None, "detail": "custom CLI: not checked"})
             continue
         for a in B.accounts(c):
-            out.append(B.auth_status(c, a, env))
+            st = B.auth_status(c, a, env)
+            if open_login and not st["logged_in"] and (c != "claude" or cli == "claude"):
+                opened = B.prompt_login(c, a, env)
+                if opened and opened.get("opened_window"):
+                    st["login_window"] = "opened; finish the sign-in there"
+            out.append(st)
     return out
 
 
@@ -887,6 +913,30 @@ def login(cli: str, account: str = "default") -> Dict:
     res = B.open_login(cli, account, base_env())
     B.clear_limits("%s@%s#" % (cli, account))   # a fresh sign-in ends a rest that was for a missing login
     return res
+
+
+def dashboard(port: int = 8765, open_browser: bool = True) -> Dict:
+    """Start the local management dashboard (dashboard.py) in the background unless it is already up."""
+    import socket
+    import webbrowser
+    url = "http://127.0.0.1:%d/" % port
+    with socket.socket() as s:
+        s.settimeout(0.5)
+        up = s.connect_ex(("127.0.0.1", port)) == 0
+    if not up:
+        flags = 0x00000200 | 0x08000000 if IS_WIN else 0   # own group, no window
+        subprocess.Popen([sys.executable, str(Path(__file__).with_name("dashboard.py")), "--port", str(port)],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         creationflags=flags, start_new_session=not IS_WIN)
+        for _ in range(40):
+            time.sleep(0.25)
+            with socket.socket() as s:
+                s.settimeout(0.5)
+                if s.connect_ex(("127.0.0.1", port)) == 0:
+                    break
+    if open_browser:
+        webbrowser.open(url)
+    return {"url": url, "already_running": up}
 
 
 def chain_view(cli: str = "", model: str = "", chain: Optional[List[str]] = None, fallback: bool = True,
@@ -934,7 +984,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     s = sub.add_parser("check")
     s.add_argument("id")
     s.add_argument("command")
-    sub.add_parser("auth").add_argument("cli", nargs="?", default="")
+    s = sub.add_parser("auth")
+    s.add_argument("cli", nargs="?", default="")
+    s.add_argument("--open", action="store_true", help="open the sign-in window of each one missing")
     s = sub.add_parser("login")
     s.add_argument("cli")
     s.add_argument("account", nargs="?", default="default")
@@ -976,6 +1028,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     sub.add_parser("cancel").add_argument("id")
     sub.add_parser("discard").add_argument("id")
     sub.add_parser("_run").add_argument("id")
+    s = sub.add_parser("dashboard", help="open the local management dashboard (sign-ins, rests, jobs)")
+    s.add_argument("--port", type=int, default=8765)
+    s.add_argument("--no-open", action="store_true")
     a = ap.parse_args(argv)
 
     if a.cmd == "_run":
@@ -1001,7 +1056,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         elif a.cmd == "check":
             out = check(a.id, a.command)
         elif a.cmd == "auth":
-            out = auth(a.cli)
+            out = auth(a.cli, a.open)
         elif a.cmd == "login":
             out = login(a.cli, a.account)
         elif a.cmd == "chain":
@@ -1024,6 +1079,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             out = merge(a.id, a.mode, a.message, a.keep)
         elif a.cmd == "cancel":
             out = cancel(a.id)
+        elif a.cmd == "dashboard":
+            out = dashboard(a.port, not a.no_open)
         else:
             out = discard(a.id)
     except (RuntimeError, ValueError, KeyError) as e:

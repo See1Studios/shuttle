@@ -21,6 +21,7 @@ Claude: tiered review (machine -> shape -> worker 2nd opinion -> targeted read) 
 | Brains | `plugins/delegate/scripts/brains.py` | difficulty tiers, fallback chains, quota-group rests, sign-in checks, accounts |
 | Ratings | `plugins/delegate/scripts/ratings.py` | per model x difficulty scores from outcomes and director verdicts; routing that skips proven-weak brains |
 | agy account swap | `plugins/delegate/scripts/agy_login.py` | `/logout` -> Google OAuth link -> pasted code, in a pseudo console |
+| Dashboard | `plugins/delegate/scripts/dashboard.py` | local page: sign-ins with a login button, rests, free models, chains, jobs |
 | MCP server | `plugins/delegate/scripts/mcp_server.py` | the same operations as `delegate_*` tools |
 | Skill | `plugins/delegate/skills/orchestrate/` | the token-saving director procedure, review checklist, sign-in & fallback guide |
 | Commands | `plugins/delegate/commands/` | `/delegate`, `/delegations`, `/delegate-auth` |
@@ -46,11 +47,14 @@ After changing files here: `claude plugin update delegate@claude-delegate`, then
   difficulty, reviews in tiers, asks before landing.
 - `/delegations` — jobs; `/delegations <id> review|merge|discard|followup <feedback>`.
 - `/delegate-auth` — sign-in state; opens sign-in where missing; agy account swap.
+- `python plugins/delegate/scripts/delegate.py dashboard` (or the `delegate_dashboard` tool) — management page at
+  `http://127.0.0.1:8765/`: who is signed in (a 로그인 button opens that CLI's sign-in window), resting quota groups
+  (clear them), opencode's free models, the difficulty chains, and the jobs (cancel / discard).
 - Or just ask: "이건 opencode/agy한테 맡기고 결과만 검토해줘".
 
 CLI without Claude: `python plugins/delegate/scripts/delegate.py --help` — `start --difficulty normal --check "..."`,
 `wait`, `result [--paths a,b]`, `check`, `followup`, `review`, `merge`, `discard`, `chain`, `ratings`, `limits`,
-`auth`, `login`, `agy-switch`.
+`auth [--open]`, `login`, `agy-switch`, `dashboard`.
 
 ## Routing, escalation, ratings
 
@@ -71,7 +75,11 @@ CLI without Claude: `python plugins/delegate/scripts/delegate.py --help` — `st
 
 ## Sign-in and accounts
 
-opencode needs none (free models). agy runs with `SSH_CONNECTION=local`, so its login is a token file under its
+opencode needs none: a chain entry without a model runs its free built-in models (`opencode models`, the
+`opencode/*` ones), the best `opencode_free_top` (3) by `opencode_prefer`, each with its own quota rest, so a
+limit on one moves to the next. A worker that turns out signed out gets its own sign-in window opened on this
+machine (at most once per `login_prompt_sec`, 15 min); when nothing else in the chain can work, the job waits up to
+`login_wait_sec` (15 min) for that sign-in and then carries on (`phase: waiting_login`). agy runs with `SSH_CONNECTION=local`, so its login is a token file under its
 home rather than the Windows credential store: sign-in is a link to click, and extra agy accounts run side by side
 like the other CLIs' (`brains.json` `"agy_file_auth": false` turns this off; then `delegate.py agy-switch` swaps
 the single login). The token file is plain, readable by this Windows user's processes. claude / codex / grok support

@@ -7,8 +7,10 @@ Use the `orchestrate` skill (read `references/auth-and-fallback.md`).
 
 Arguments: $ARGUMENTS
 
-1. Call `delegate_auth` (for the named CLI if one is given) and show a compact table: cli, account, signed in, detail.
-2. For each account that is not signed in, show its exact login command.
+1. Call `delegate_auth` (for the named CLI if one is given; it opens the sign-in window of each one missing) and
+   show a compact table: cli, account, signed in, detail. Tell the user which windows opened and to finish there.
+2. For each account still not signed in without a window, show its exact login command. Offer
+   `delegate_dashboard` for a page that shows and manages all of it.
 3. If a CLI and account were named, or the user agrees, call `delegate_login(cli, account)` to open the CLI's own
    sign-in window, and tell the user to finish it there. A new account name creates a new account (more quota).
 4. When the user says they are done, run `delegate_auth` again to confirm and clear stale rests with

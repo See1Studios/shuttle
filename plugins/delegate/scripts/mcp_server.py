@@ -54,10 +54,20 @@ def delegate_compete(clis: List[str], task: str, repo: str, title: str = "", bas
 
 
 @mcp.tool()
-def delegate_auth(cli: str = "") -> list:
-    """Sign-in state of every account of every installed CLI (or one CLI). Entries with logged_in=false carry the
-    exact `login` command to give the operator. Run this before a big fan-out, and when a job reports needs_login."""
-    return d.auth(cli)
+def delegate_auth(cli: str = "", open_login: bool = True) -> list:
+    """Sign-in state of every account of every installed CLI (or one CLI). Each one not signed in gets its own
+    sign-in window opened on this machine (open_login; claude only when named) and carries the `login` command:
+    tell the operator to finish it there. opencode needs no sign-in (free built-in models). Jobs open the window
+    themselves when a worker turns out signed out, and wait for the sign-in when nothing else in the chain can work."""
+    return d.auth(cli, open_login)
+
+
+@mcp.tool()
+def delegate_dashboard(open_browser: bool = True) -> dict:
+    """Open the local management dashboard on this machine (starts it if needed): sign-in state with a button that
+    opens each CLI's sign-in window, resting quota groups (clear them), opencode's free models, the difficulty
+    chains, and the jobs (cancel / discard). Give the operator the returned url."""
+    return d.dashboard(open_browser=open_browser)
 
 
 @mcp.tool()

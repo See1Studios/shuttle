@@ -27,6 +27,8 @@ from typing import Dict, List, Optional, Tuple
 HOME = Path(os.environ.get("DELEGATE_HOME") or Path.home() / ".claude-delegate")
 ACCOUNTS = HOME / "accounts"
 LIMITS = HOME / "limits.json"
+LOGIN_PROMPTS = HOME / "login-prompts.json"   # when a sign-in window was last opened per cli@account
+OPENCODE_MODELS = HOME / "opencode-models.json"   # cached `opencode models` (free built-in list)
 CONFIG = HOME / "brains.json"
 IS_WIN = os.name == "nt"
 USER_HOME = Path.home()
@@ -67,6 +69,15 @@ DEFAULTS = {
                  "claude": ["agy", "codex", "opencode", "grok"]},
     "order": "model-first",      # model-first: a model on every account before the next model; or account-first
     "auth_rest_sec": 6 * 3600,
+    # A worker found signed out gets its own sign-in window opened on this machine (at most once per
+    # `login_prompt_sec` per account); when the rest of the chain is out too, the job waits up to `login_wait_sec`
+    # for the sign-in to land and then carries on with that worker. 0 turns the window / the wait off.
+    "login_prompt_sec": 15 * 60,
+    "login_wait_sec": 15 * 60,
+    # opencode without a model runs its free built-in models (no sign-in): the first `opencode_free_top` of
+    # `opencode models`' opencode/* list, those matching `opencode_prefer` first, each with its own quota rest.
+    "opencode_prefer": ["deepseek", "glm", "nemotron-3-ultra", "longcat", "mimo", "big-pickle"],
+    "opencode_free_top": 3,
     "commit_rounds": False,      # True: commit each round on the job branch (runs the repo's hooks every round)
     # agy keeps its login in a token file under its home instead of the OS credential store (see FILE_AUTH_ENV).
     "agy_file_auth": True,
@@ -151,6 +162,8 @@ def quota_group(b: Dict) -> str:
     """The pool a quota hit empties: per account, and for agy per model family as well. agy's single login can be
     swapped to another Google account (agy_login.py), so its default account is keyed by the signed-in email."""
     group, account = "*", b.get("account") or "default"
+    if b["cli"] == "opencode" and b.get("model"):   # each free model has its own limits
+        group = b["model"]
     if b["cli"] == "agy":
         m = (b.get("model") or "").lower()
         group = "gemini" if (not m or m.startswith("gemini")) else "claude-gpt"
@@ -264,8 +277,10 @@ def auth_status(cli: str, account: str, base_env: Dict[str, str]) -> Dict:
         code, text = _probe(["opencode", "models"], env, timeout=60)
         models = [line for line in text.splitlines() if "/" in line and " " not in line.strip()]
         free = sum(1 for m in models if m.startswith("opencode/"))
-        out.update(logged_in=code == 0 and bool(models),
-                   detail="%d models (%d free built-in)" % (len(models), free) if models else text[-200:])
+        # The list sometimes comes back empty; that is a flaky probe, not a missing sign-in.
+        out.update(logged_in=bool(shutil.which("opencode")),
+                   detail=("%d models (%d free built-in)" % (len(models), free)) if models
+                   else "free built-in models; no sign-in needed")
     if not out["logged_in"]:
         out["login"] = login_guide(cli, account)
     return out
@@ -311,6 +326,90 @@ def open_login(cli: str, account: str, base_env: Dict[str, str]) -> Dict:
 
 
 # ------------------------------------------------------------------ chains and rest
+
+def opencode_free_models(refresh: bool = False) -> List[str]:
+    """opencode's free built-in models (opencode/*), best first by `opencode_prefer`. Cached for 6 h."""
+    try:
+        cached = json.loads(OPENCODE_MODELS.read_text(encoding="utf-8"))
+        if not refresh and time.time() - cached.get("at", 0) < 6 * 3600 and cached.get("models"):
+            return _rank_free(cached["models"])
+    except (OSError, ValueError):
+        cached = {}
+    models: List[str] = []
+    for _ in range(3):   # `opencode models` now and then prints nothing
+        code, text = _probe(["opencode", "models"], dict(os.environ), timeout=60)
+        models = [m.strip() for m in text.splitlines() if m.strip().startswith("opencode/") and " " not in m.strip()]
+        if models:
+            break
+    if models:
+        HOME.mkdir(parents=True, exist_ok=True)
+        OPENCODE_MODELS.write_text(json.dumps({"at": time.time(), "models": models}), encoding="utf-8")
+    else:
+        models = cached.get("models") or []
+    return _rank_free(models)
+
+
+def _rank_free(models: List[str]) -> List[str]:
+    prefer = [p.lower() for p in config().get("opencode_prefer") or []]
+
+    def rank(m: str):
+        hits = [i for i, p in enumerate(prefer) if p in m.lower()]
+        return (hits[0] if hits else len(prefer), models.index(m))
+    return sorted(models, key=rank)
+
+
+def expand(brains: List[Dict]) -> List[Dict]:
+    """A model-less opencode brain becomes its best free models, so one model's limit falls through to the next."""
+    out: List[Dict] = []
+    for b in brains:
+        if b["cli"] == "opencode" and not b.get("model"):
+            free = opencode_free_models()[:max(1, int(config().get("opencode_free_top") or 1))]
+            if free:
+                out += [{**b, "model": m} for m in free if {**b, "model": m} not in out]
+                continue
+        if b not in out:
+            out.append(b)
+    return out
+
+
+def prompt_login(cli: str, account: str, base_env: Dict[str, str]) -> Optional[Dict]:
+    """Open `cli`'s sign-in window for `account`, unless one was opened in the last `login_prompt_sec`.
+    opencode needs no sign-in; a CLI without a known login flow is left to the operator."""
+    every = int(config().get("login_prompt_sec") or 0)
+    if cli == "opencode" or cli not in LOGIN_ARGV or every <= 0 or not IS_WIN:
+        return None
+    key = "%s@%s" % (cli, account or "default")
+    try:
+        state = json.loads(LOGIN_PROMPTS.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        state = {}
+    if time.time() - state.get(key, 0) < every:
+        return None
+    try:
+        res = open_login(cli, account, base_env)
+    except Exception as e:  # noqa: BLE001 - not installed etc.: the caller still reports the login command
+        return {"cli": cli, "account": account, "opened_window": False, "error": str(e)}
+    state[key] = time.time()
+    HOME.mkdir(parents=True, exist_ok=True)
+    LOGIN_PROMPTS.write_text(json.dumps(state), encoding="utf-8")
+    return res
+
+
+def wait_for_login(brains: List[Dict], base_env: Dict[str, str], seconds: int, every: float = 10.0,
+                   stop=None) -> Optional[Dict]:
+    """Poll the sign-in of `brains` until one is signed in (its auth rest is cleared and it is returned), the time
+    is up, or `stop()` says so."""
+    end = time.time() + seconds
+    while time.time() < end:
+        time.sleep(every)
+        if stop and stop():
+            return None
+        for b in brains:
+            if auth_status(b["cli"], b["account"], base_env).get("logged_in"):
+                clear_limits(quota_group(b).split("#")[0] + "#")   # every model family of that account
+                return b
+    return None
+
 
 def chain_for(cli: str, model: str = "", fallback: bool = True, installed=None) -> List[Dict]:
     """The default chain for a job given its first CLI: that CLI's models x accounts, then the fallback CLIs'."""

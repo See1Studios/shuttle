@@ -68,8 +68,10 @@ the check at it. `auto_fix_rounds` (default 2) is per worker before it escalates
   `delegate_compete` only when the choice really matters: it doubles what you review.
 - One line to the operator with the job ids, then `delegate_wait(ids, timeout_sec=600)` (compact states). Don't
   poll `delegate_status` in between; don't narrate waits.
-- Once per session before the first job, or when a job reports `needs_login`: `delegate_auth()`; see
-  `references/auth-and-fallback.md` (sign-in, extra accounts, swapping agy's Google account).
+- Once per session before the first job, or when a job reports `needs_login` / `phase: waiting_login`:
+  `delegate_auth()` — it opens the sign-in window of each worker missing one; tell the operator to finish it there
+  (the waiting job carries on by itself). `delegate_dashboard()` when they want to see and manage it all. See
+  `references/auth-and-fallback.md`. opencode needs no sign-in: never ask the operator to log it in.
 - A `warnings` entry about the main working tree changing while a worker ran means a possible escaped write:
   look at the operator's `git status` before anything else and tell them.
 

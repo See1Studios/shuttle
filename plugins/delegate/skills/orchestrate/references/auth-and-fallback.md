@@ -8,7 +8,7 @@ A **brain** is `cli:model@account`. Every job runs down a **chain** of brains: a
 | stop | detected by | what happens |
 |---|---|---|
 | quota / rate limit / outage | "429", "usage limit", "resets in 2h5m", 5xx … | its quota group rests until the reset (15 min if none given) |
-| not signed in | "not logged in", "401", "OAuth … expired" … | rests 6 h; `needs_login` lists the login command |
+| not signed in | "not logged in", "401", "OAuth … expired" … | its sign-in window opens on this machine; rests until signed in (6 h max); when the whole chain is out, the job waits for the sign-in (`phase: waiting_login`, up to `login_wait_sec`) and carries on |
 | blocked by its permission mode | "headless mode cannot prompt … auto-denied" (exit 0, nothing done) | rests 6 h; fix the permissions or let others do it |
 | failed (exit ≠ 0) | anything else | next brain takes over (no rest) |
 | check still failing after its automatic rounds | the job's `check` | **escalates** to the next brain (rated `escalated`) |
@@ -24,17 +24,19 @@ the old account's rests are remembered for when it comes back.
 
 | CLI | Sign-in | Notes |
 |---|---|---|
-| opencode | none needed | free built-in models (`opencode models`); always run with `--standalone` so it works in the worktree |
+| opencode | none needed | without a model: its best free built-in models (`opencode_prefer`, top `opencode_free_top`), one quota rest each; always `--standalone` so it works in the worktree |
 | agy | Google account, token file per account home | extra accounts with `delegate_login("agy", name)` (below) |
 | claude | `claude auth login` | spends Claude quota; never automatic |
 | codex, grok | — | disabled (no subscription); implemented, enable in `brains.json` |
 
 ## Checking sign-in
 
-1. `delegate_auth()` — every enabled CLI and account with `logged_in`.
-2. For a missing login, give the operator the `login` command from the result, or offer
-   `delegate_login(cli, account)`, which opens the CLI's own sign-in in a new console window (ask first). You never
-   type or see credentials.
+1. `delegate_auth()` — every enabled CLI and account with `logged_in`; each one missing gets its sign-in window
+   opened on this machine (`login_window` in the row; claude only when named). Tell the operator to finish it there.
+   You never type or see credentials. `delegate_dashboard()` gives them a page with the same state and a login
+   button per CLI.
+2. Jobs do this by themselves: a worker found signed out opens its sign-in window, the next brain takes over, and
+   when none is left the job waits for the sign-in and carries on.
 3. Extra accounts (more quota) for claude / codex / grok / opencode: `delegate_login(cli, "<name>")` creates
    `~/.claude-delegate/accounts/<cli>/<name>/` and points the CLI there (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`,
    `GROK_HOME`, `XDG_DATA_HOME`). The account joins that CLI's chains. `env.json` there may hold an API key; it is
@@ -82,6 +84,10 @@ Without Claude: `python delegate.py agy-switch` (prints the link, prompts for th
   "disabled": ["codex", "grok"],
   "ratings": { "min_events": 4, "min_score": 0.35, "explore": 0.15 },
   "auth_rest_sec": 21600,
+  "login_prompt_sec": 900,
+  "login_wait_sec": 900,
+  "opencode_prefer": ["deepseek", "glm", "nemotron-3-ultra", "longcat", "mimo", "big-pickle"],
+  "opencode_free_top": 3,
   "exclude": ["/.delegate/", "graft/.cache/", "graft/.graph/"],
   "commit_rounds": false
 }
