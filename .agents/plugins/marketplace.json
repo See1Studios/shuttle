@@ -14,7 +14,7 @@
       "name": "shuttle",
       "source": {
         "source": "local",
-        "path": "./plugins/shuttle"
+        "path": "./"
       },
       "policy": {
         "installation": "AVAILABLE",

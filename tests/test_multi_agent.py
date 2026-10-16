@@ -13,7 +13,7 @@ from pathlib import Path
 os.environ.setdefault("SHUTTLE_HOME", tempfile.mkdtemp(prefix="shuttle-test-"))
 os.environ["SHUTTLE_NO_DASHBOARD"] = "1"
 PLUGIN_DIR = Path(__file__).resolve().parents[1]
-REPO_ROOT = PLUGIN_DIR.parents[1]
+REPO_ROOT = PLUGIN_DIR
 SCRIPTS = Path(os.environ.get("SHUTTLE_SCRIPTS") or PLUGIN_DIR / "scripts")
 sys.path.insert(0, str(SCRIPTS))
 import shuttle as D  # noqa: E402

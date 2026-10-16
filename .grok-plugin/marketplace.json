@@ -5,7 +5,7 @@
   "plugins": [
     {
       "name": "shuttle",
-      "source": "./plugins/shuttle",
+      "source": "./",
       "description": "Shuttle tasks to opencode / agy / codex / claude / grok in isolated git worktrees, review the diff, request rework, land it."
     }
   ]

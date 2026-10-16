@@ -1065,11 +1065,8 @@ def _enable_grok_plugin(cfg: Path) -> None:
 
 def install(agent: str = "all") -> List[Dict]:
     """Install or update the shuttle plugin across installed host agents (claude, codex, agy, grok, opencode)."""
-    plugin_dir = Path(os.path.abspath(__file__)).parents[1]
-    repo_root = plugin_dir.parents[1]
-    if repo_root.name != "shuttle" and (repo_root.parent / "shuttle" / "plugins" / "shuttle").exists():
-        repo_root = repo_root.parent / "shuttle"
-        plugin_dir = repo_root / "plugins" / "shuttle"
+    repo_root = Path(os.path.abspath(__file__)).parents[1]
+    plugin_dir = repo_root
     targets = ["claude", "codex", "agy", "grok", "opencode"] if agent in ("", "all") else [agent]
     out: List[Dict] = []
     for name in targets:

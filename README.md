@@ -18,14 +18,14 @@ Director: tiered review (machine -> shape -> worker 2nd opinion -> targeted read
 
 | Part | Path | What it does |
 |---|---|---|
-| Runner + CLI | `plugins/shuttle/scripts/shuttle.py` | worktrees, background jobs, briefs, check/auto-fix/escalate loop, lean results, rework, second-opinion reviews, merge/discard, host installer |
-| Brains | `plugins/shuttle/scripts/brains.py` | difficulty tiers, fallback chains, quota-group rests, sign-in checks, accounts |
-| Ratings | `plugins/shuttle/scripts/ratings.py` | per model x difficulty scores from outcomes and director verdicts; routing that skips proven-weak brains |
-| agy account swap | `plugins/shuttle/scripts/agy_login.py` | `/logout` -> Google OAuth link -> pasted code, in a pseudo console |
-| Dashboard | `plugins/shuttle/scripts/dashboard.py` | local page: sign-ins with a login button, rests, free models, chains, jobs |
-| MCP server | `plugins/shuttle/scripts/mcp_server.py` | the same operations as `shuttle_*` tools on MCP server `shuttle` (automatically hidden inside worker processes) |
-| Skills | `plugins/shuttle/skills/` | `orchestrate` (token-saving director procedure), `/shuttle`, `/shuttles`, `/shuttle-auth` |
-| Plugin manifests | `plugins/shuttle/{plugin.json,.claude-plugin,.codex-plugin}` | native manifests and MCP configs for Claude Code, Codex, Antigravity, Grok Build, and OpenCode |
+| Runner + CLI | `scripts/shuttle.py` | worktrees, background jobs, briefs, check/auto-fix/escalate loop, lean results, rework, second-opinion reviews, merge/discard, host installer |
+| Brains | `scripts/brains.py` | difficulty tiers, fallback chains, quota-group rests, sign-in checks, accounts |
+| Ratings | `scripts/ratings.py` | per model x difficulty scores from outcomes and director verdicts; routing that skips proven-weak brains |
+| agy account swap | `scripts/agy_login.py` | `/logout` -> Google OAuth link -> pasted code, in a pseudo console |
+| Dashboard | `scripts/dashboard.py` | local page: sign-ins with a login button, rests, free models, chains, jobs |
+| MCP server | `scripts/mcp_server.py` | the same operations as `shuttle_*` tools on MCP server `shuttle` (automatically hidden inside worker processes) |
+| Skills | `skills/` | `orchestrate` (token-saving director procedure), `/shuttle`, `/shuttles`, `/shuttle-auth` |
+| Plugin manifests | `{plugin.json,.claude-plugin,.codex-plugin}` | native manifests and MCP configs for Claude Code, Codex, Antigravity, Grok Build, and OpenCode |
 
 ## Install
 
@@ -33,20 +33,20 @@ Requirements: Python 3.10+, `pip install mcp pywinpty` (mcp 1.x or 2.x; pywinpty
 git, and the worker CLIs on `PATH`.
 
 Install or update `shuttle` across **all installed coding agents** on this machine with one command:
-
+ 
 ```bash
-python plugins/shuttle/scripts/shuttle.py install
+python scripts/shuttle.py install
 ```
 
-Or install per agent (`python plugins/shuttle/scripts/shuttle.py install claude|codex|agy|grok|opencode`), or using
+Or install per agent (`python scripts/shuttle.py install claude|codex|agy|grok|opencode`), or using
 each agent's native plugin manager:
 
 - **Claude Code**: `claude plugin marketplace add . && claude plugin install shuttle@shuttle`
   (after edits: `claude plugin update shuttle@shuttle`)
 - **OpenAI Codex**: `codex plugin marketplace add . && codex plugin add shuttle@shuttle`
-- **Antigravity (`agy` CLI & IDE)**: `agy-real plugin install ./plugins/shuttle --force`
+- **Antigravity (`agy` CLI & IDE)**: `agy-real plugin install . --force`
   (also auto-discovered in this workspace via `.agents/plugins.json`)
-- **Grok Build**: `grok plugin install ./plugins/shuttle --trust` (enabled in `~/.grok/config.toml`)
+- **Grok Build**: `grok plugin install . --trust` (enabled in `~/.grok/config.toml`)
 - **OpenCode**: `shuttle.py install opencode` registers the MCP server in `~/.config/opencode/opencode.json` and
   installs the skills into `~/.config/opencode/skills/`.
 
@@ -56,13 +56,13 @@ each agent's native plugin manager:
   difficulty, reviews in tiers, asks before landing.
 - `/shuttles` — jobs; `/shuttles <id> review|merge|discard|followup <feedback>`.
 - `/shuttle-auth` — sign-in state; opens sign-in where missing; agy account swap.
-- `python plugins/shuttle/scripts/shuttle.py dashboard` (or the `shuttle_dashboard` tool) — management page at
+- `python scripts/shuttle.py dashboard` (or the `shuttle_dashboard` tool) — management page at
   `http://127.0.0.1:8765/`: who is signed in (a 로그인 button opens that CLI's sign-in window), resting quota groups
   (clear them), opencode's free models, the difficulty chains, and the jobs (cancel / discard). Starting a job brings
   it up and opens it in the browser the first time (`dashboard_on_start`); the start result carries its url.
 - Or just ask: "이건 opencode/agy한테 맡기고 결과만 검토해줘".
 
-CLI without an agent: `python plugins/shuttle/scripts/shuttle.py --help` — `install [agent]`,
+CLI without an agent: `python scripts/shuttle.py --help` — `install [agent]`,
 `start --difficulty normal --check "..."`, `wait`, `result [--paths a,b]`, `check`, `followup`, `review`, `merge`,
 `discard`, `chain`, `ratings`, `limits`, `auth [--open]`, `login`, `agy-switch`, `dashboard`.
 
@@ -100,7 +100,7 @@ machine (at most once per `login_prompt_sec`, 15 min); when nothing else in the 
 home rather than the Windows credential store: sign-in is a link to click, and extra agy accounts run side by side
 like the other CLIs' (`brains.json` `"agy_file_auth": false` turns this off; then `shuttle.py agy-switch` swaps
 the single login). The token file is plain, readable by this Windows user's processes. claude / codex / grok support
-extra accounts through per-account config folders. Guide: `plugins/shuttle/skills/orchestrate/references/auth-and-fallback.md`.
+extra accounts through per-account config folders. Guide: `skills/orchestrate/references/auth-and-fallback.md`.
 
 ## Worker permissions (safety)
 
