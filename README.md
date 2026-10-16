@@ -111,7 +111,13 @@ workers run in `~/.claude-delegate/accounts/agy/default/` (the operator's settin
 the operator's login token; the operator's own agy settings are never touched). A deny beats any allow there, so
 `agy_permissions` is all-or-nothing per rule. `"agy_worker_home": false` in `brains.json` goes back to the
 operator's home. A worker that shows no progress (logs, worktree, agy's own log) for `stall_sec` (4 min) is stopped
-and the next brain takes over. Other overrides go in `~/.claude-delegate/providers.json`:
+and the next brain takes over.
+
+YOLO (opt-in): `"agy_yolo": true` runs agy workers with `--dangerously-skip-permissions`, so they run tests and fix
+what fails themselves. Verified: deny rules still hold in that mode (`agy_yolo_deny`: rm/del/Remove-Item, git
+push/reset/clean/checkout, curl/wget, ssh, installs …), but `--sandbox` does not keep writes inside the worktree
+and an interpreter (`python -c …`) can do whatever a denied command could. Use it only where that is acceptable.
+Other overrides go in `~/.claude-delegate/providers.json`:
 
 ```json
 {

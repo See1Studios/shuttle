@@ -224,6 +224,8 @@ def command(cli: str, kind: str, cwd: Path, model: str, prompt: str, effort: str
         flags += [spec["workdir_flag"], str(cwd)]
     if model:
         flags += [spec["model_flag"], model]
+    if cli == "agy" and kind == "work" and B.config().get("agy_yolo"):   # opt-in; see brains.DEFAULTS agy_yolo
+        flags += ["--dangerously-skip-permissions"]
     if effort and spec.get("effort_flag"):   # agy has none: its effort is the model's -low/-medium/-high variant
         flags += [f.format(effort) for f in spec["effort_flag"]]
     argv = with_flags(spec[kind], flags) + [prompt]

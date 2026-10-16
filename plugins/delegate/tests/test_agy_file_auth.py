@@ -39,6 +39,16 @@ class AgyFileAuth(unittest.TestCase):
         self.assertEqual(settings["permissions"], {"deny": ["command(*)"]})
         self.assertEqual(B.accounts("agy"), ["default"])   # the worker home is not listed as another account
 
+    def test_yolo_is_opt_in_and_keeps_the_denylist(self):
+        self.assertNotIn("--dangerously-skip-permissions", D.command("agy", "work", self.tmp, "", "p"))
+        B.CONFIG.write_text(json.dumps({"agy_yolo": True}), encoding="utf-8")
+        self.assertIn("--dangerously-skip-permissions", D.command("agy", "work", self.tmp, "", "p"))
+        self.assertNotIn("--dangerously-skip-permissions", D.command("agy", "review", self.tmp, "", "p"))
+        env = B.account_env("agy", "default")
+        settings = json.loads((Path(env["HOME"]) / ".gemini" / "antigravity-cli" / "settings.json").read_text(encoding="utf-8"))
+        self.assertIn("command(git push)", settings["permissions"]["deny"])
+        self.assertNotIn("command(*)", settings["permissions"]["deny"])
+
     def test_named_accounts_get_the_worker_permissions_too(self):
         B.add_account("agy", "work9")
         env = B.account_env("agy", "work9")

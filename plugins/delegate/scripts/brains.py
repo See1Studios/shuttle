@@ -106,6 +106,17 @@ DEFAULTS = {
     # home and settings as they are.
     "agy_worker_home": True,
     "agy_permissions": {"deny": ["command(*)"]},
+    # Opt-in: agy workers run with --dangerously-skip-permissions, so they can run tests and fix what fails. Deny
+    # rules still hold in that mode (verified), so the commands below stay blocked; --sandbox does NOT keep writes
+    # inside the worktree (verified: python wrote outside it), and an interpreter can do anything a denied command
+    # could. Only for repos and tasks where that is acceptable.
+    "agy_yolo": False,
+    "agy_yolo_deny": ["command(rm)", "command(del)", "command(rmdir)", "command(rd)", "command(Remove-Item)",
+                      "command(git push)", "command(git reset)", "command(git clean)", "command(git checkout)",
+                      "command(git switch)", "command(git branch -D)", "command(curl)", "command(wget)",
+                      "command(Invoke-WebRequest)", "command(Invoke-RestMethod)", "command(ssh)", "command(scp)",
+                      "command(npm publish)", "command(pip install)", "command(npm install -g)", "command(winget)",
+                      "command(choco)", "command(format)", "command(shutdown)", "command(reg)", "command(setx)"],
     # Paths a worker's tools write that must never be committed (added to the repo's .git/info/exclude).
     "exclude": ["/.delegate/", "graft/.cache/", "graft/.graph/"],
 }
@@ -215,7 +226,9 @@ def agy_worker_settings(home: Path) -> Path:
         settings = json.loads(src.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         settings = {}
-    settings["permissions"] = config().get("agy_permissions") or {}
+    cfg = config()
+    settings["permissions"] = ({"deny": list(cfg.get("agy_yolo_deny") or [])} if cfg.get("agy_yolo")
+                               else cfg.get("agy_permissions") or {})
     dst.parent.mkdir(parents=True, exist_ok=True)
     # The default account's worker home is the operator's own Google login: seed it with that token file instead
     # of asking for a second sign-in. (A named account is another Google account and signs in itself.)
