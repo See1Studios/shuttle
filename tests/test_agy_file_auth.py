@@ -1,7 +1,7 @@
 """agy runs with SSH_CONNECTION set, so its login is a token file under its home (one per account) instead of the
 OS credential store's single entry. Checks the environment only; no agy process is started.
 
-Run: python -m unittest discover -s plugins/shuttle/tests -v
+Run: python -m unittest discover -s tests -v
 """
 import json
 import os

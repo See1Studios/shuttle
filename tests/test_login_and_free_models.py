@@ -1,7 +1,7 @@
 """opencode runs its free built-in models without a sign-in, and a signed-out worker gets its sign-in window opened
 (throttled) and waited for. No CLI is started: the probes and the window are stubbed.
 
-Run: python -m unittest discover -s plugins/shuttle/tests -v
+Run: python -m unittest discover -s tests -v
 """
 import json
 import os

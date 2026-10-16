@@ -1,6 +1,6 @@
 """Multi-agent director & plugin compatibility tests for Shuttle (Claude Code, Codex, Antigravity, Grok, OpenCode).
 
-Run: python -m unittest discover -s plugins/shuttle/tests -v
+Run: python -m unittest discover -s tests -v
 """
 import json
 import os

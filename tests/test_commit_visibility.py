@@ -1,7 +1,7 @@
 """How a job's commit is reported and timed: a refused commit hook must show in status/wait (not only in
 result), the repo's hooks run once per landing by default, and agent_finished / commit_sec are recorded.
 
-Run: python -m unittest discover -s plugins/shuttle/tests -v
+Run: python -m unittest discover -s tests -v
 Hermetic: SHUTTLE_HOME and the git repos live in a temp dir; no worker CLI is launched.
 """
 import json

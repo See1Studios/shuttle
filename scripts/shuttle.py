@@ -1066,6 +1066,9 @@ def _enable_grok_plugin(cfg: Path) -> None:
 def install(agent: str = "all") -> List[Dict]:
     """Install or update the shuttle plugin across installed host agents (claude, codex, agy, grok, opencode)."""
     repo_root = Path(os.path.abspath(__file__)).parents[1]
+    alias = repo_root.parent / "shuttle"
+    if alias.exists() and os.path.samefile(repo_root, alias):
+        repo_root = alias
     plugin_dir = repo_root
     targets = ["claude", "codex", "agy", "grok", "opencode"] if agent in ("", "all") else [agent]
     out: List[Dict] = []
@@ -1075,11 +1078,10 @@ def install(agent: str = "all") -> List[Dict]:
                 out.append({"agent": name, "installed": False, "detail": "claude CLI not on PATH"})
                 continue
             run(["claude", "plugin", "uninstall", "delegate@claude-delegate"])
+            run(["claude", "plugin", "uninstall", "shuttle@shuttle"])
             run(["claude", "plugin", "marketplace", "remove", "claude-delegate"])
             run(["claude", "plugin", "marketplace", "add", str(repo_root)])
             p = run(["claude", "plugin", "install", "shuttle@shuttle"])
-            if p.returncode != 0 or "already installed" in (p.stdout + p.stderr).lower():
-                p = run(["claude", "plugin", "update", "shuttle@shuttle"])
             out.append({"agent": name, "installed": p.returncode == 0,
                         "detail": (p.stdout or p.stderr).strip().splitlines()[-1] if (p.stdout or p.stderr).strip() else "ok"})
         elif name == "codex":
