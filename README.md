@@ -205,11 +205,11 @@ Every operation is available both as an MCP tool for the director agent and as a
 | `shuttle_chain` / `shuttle_ratings` / `shuttle_limits` | `chain` / `ratings` / `limits` | Inspect difficulty chains, model scores, and resting quota groups |
 | `shuttle_auth` / `shuttle_login` | `auth` / `login` | Check worker sign-ins or open a worker CLI's login window |
 | `shuttle_agy_switch` / `shuttle_agy_code` | `agy-switch` / `agy-code` | Swap `agy`'s Google account via OAuth link + pasted code |
-| `shuttle_dashboard` | `dashboard` | Open the local web dashboard at `http://127.0.0.1:8765/` |
+| `shuttle_dashboard` | `dashboard` | Open the local web dashboard at `http://127.0.0.1:8790/` |
 
 ### Local management dashboard
 
-Starting a job automatically brings up the local dashboard at `http://127.0.0.1:8765/` (disable with `"dashboard_on_start": false` in `brains.json` or `SHUTTLE_NO_DASHBOARD=1`). You can also launch it anytime:
+Starting a job automatically brings up the local dashboard at `http://127.0.0.1:8790/` (disable with `"dashboard_on_start": false` in `brains.json` or `SHUTTLE_NO_DASHBOARD=1`). You can also launch it anytime:
 
 ```bash
 python scripts/shuttle.py dashboard
@@ -255,7 +255,7 @@ Workers run headless with restricted permissions by default—Shuttle never wide
 | [`scripts/shuttle.py`](scripts/shuttle.py) | Worktree runner, background job lifecycle, check/auto-fix/escalate loop, merge/discard, multi-agent installer |
 | [`scripts/brains.py`](scripts/brains.py) | Difficulty ladders, live model discovery, quota-group rests, sign-in probes, multi-account homes |
 | [`scripts/ratings.py`](scripts/ratings.py) | Per-model &times; difficulty Laplace-smoothed score tracker and weak-brain filter |
-| [`scripts/dashboard.py`](scripts/dashboard.py) | Local HTTP management dashboard (`127.0.0.1:8765`, CSRF-guarded via `X-Shuttle: 1`) |
+| [`scripts/dashboard.py`](scripts/dashboard.py) | Local HTTP management dashboard (`127.0.0.1:8790`, CSRF-guarded via `X-Shuttle: 1`) |
 | [`scripts/mcp_server.py`](scripts/mcp_server.py) | FastMCP server exposing `shuttle_*` tools to the director (hidden when `SHUTTLE_WORKER=1`) |
 | [`scripts/signin.py`](scripts/signin.py) / [`scripts/agy_login.py`](scripts/agy_login.py) | Interactive login window launcher and pseudo-console `agy` OAuth account switcher |
 | [`skills/`](skills/) | Unified skills (`orchestrate`, `shuttle`, `shuttles`, `shuttle-auth`) and review/auth references |

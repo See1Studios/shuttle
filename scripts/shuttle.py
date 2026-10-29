@@ -1008,7 +1008,7 @@ def login(cli: str, account: str = "default") -> Dict:
     return res
 
 
-def dashboard(port: int = 8765, open_browser: bool = True) -> Dict:
+def dashboard(port: int = 8790, open_browser: bool = True) -> Dict:
     """Start the local management dashboard (dashboard.py) in the background unless it is already up."""
     import socket
     import webbrowser
@@ -1218,7 +1218,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     sub.add_parser("discard").add_argument("id")
     sub.add_parser("_run").add_argument("id")
     s = sub.add_parser("dashboard", help="open the local management dashboard (sign-ins, rests, jobs)")
-    s.add_argument("--port", type=int, default=8765)
+    s.add_argument("--port", type=int, default=8790)
     s.add_argument("--no-open", action="store_true")
     a = ap.parse_args(argv)
 

@@ -5,8 +5,11 @@ desktop and its long link wraps, so the link is opened (and shown on the dashboa
 
     python signin.py agy <account>
 
-State for the dashboard: $SHUTTLE_HOME/signin-<cli>-<account>.json ({state, url, started, error}). Nothing typed
-by the operator passes through here; with agy's file auth the browser completes the sign-in on its own.
+Google's page then shows a response code that agy waits for (redirect antigravity.google/oauth-callback). The operator
+pastes it on the dashboard; submit_code() drops it in $SHUTTLE_HOME/signin-<cli>-<account>.code, this process reads
+it, deletes the file at once and types it into agy. The code is never logged or put in the state file.
+
+State for the dashboard: $SHUTTLE_HOME/signin-<cli>-<account>.json ({state, url, started, error}).
 """
 from __future__ import annotations
 
@@ -21,13 +24,38 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import brains as B  # noqa: E402
-from agy_login import ANSI, URL_RE  # noqa: E402
+from agy_login import ANSI, FAIL_RE, URL_RE  # noqa: E402
 
 TIMEOUT = 15 * 60
 
 
 def state_path(cli: str, account: str) -> Path:
     return B.HOME / ("signin-%s-%s.json" % (cli, account or "default"))
+
+
+def code_path(cli: str, account: str) -> Path:
+    return B.HOME / ("signin-%s-%s.code" % (cli, account or "default"))
+
+
+def submit_code(cli: str, account: str, code: str) -> dict:
+    """The dashboard's hand-off: the running sign-in picks the code up within a couple of seconds."""
+    code = (code or "").strip()
+    if not code:
+        raise ValueError("empty code")
+    if read_state(cli, account).get("state") not in ("awaiting_browser", "code_sent"):
+        raise ValueError("no sign-in is waiting for a code; press 로그인 first")
+    code_path(cli, account).write_text(code, encoding="utf-8")
+    return {"ok": True}
+
+
+def _take_code(cli: str, account: str) -> str:
+    p = code_path(cli, account)
+    try:
+        code = p.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+    p.unlink(missing_ok=True)
+    return code
 
 
 def read_state(cli: str, account: str) -> dict:
@@ -54,6 +82,7 @@ def agy(account: str) -> int:
     room = home / "signin-room"
     room.mkdir(parents=True, exist_ok=True)
     _write("agy", account, state="starting", url="", error="", started=time.time(), pid=os.getpid())
+    code_path("agy", account).unlink(missing_ok=True)       # a stale code from an earlier attempt is useless
     proc = PtyProcess.spawn(exe, dimensions=(50, 2000), cwd=str(room), env=env)   # wide: the URL never wraps
     chunks, lock = [], threading.Lock()
 
@@ -73,6 +102,7 @@ def agy(account: str) -> int:
 
     trusted = picked = False
     url = ""
+    mark = 0          # screen offset after the last code typed: a refusal is only read past it
     end = time.time() + TIMEOUT
     try:
         while time.time() < end and proc.isalive():
@@ -89,6 +119,14 @@ def agy(account: str) -> int:
                 url = m.group(0).rstrip(").,;]'\"")
                 _write("agy", account, state="awaiting_browser", url=url)
                 webbrowser.open(url)
+            code = _take_code("agy", account) if url else ""
+            if code:
+                proc.write(code + "\r")
+                _write("agy", account, state="code_sent")
+                mark = len(t)
+            if url and mark and FAIL_RE.search(t[mark:]):
+                _write("agy", account, state="awaiting_browser", error="agy refused the code; open the link again")
+                mark = len(t)
             if url and ("for shortcuts" in t[t.find(url):] or B.auth_status("agy", account, os.environ).get("logged_in")):
                 _write("agy", account, state="signed_in", url="")
                 return 0
@@ -101,6 +139,7 @@ def agy(account: str) -> int:
                error="" if ok else "no sign-in within %d min; screen tail: %s" % (TIMEOUT // 60, text()[-400:]))
         return 0 if ok else 1
     finally:
+        code_path("agy", account).unlink(missing_ok=True)
         try:
             proc.terminate(force=True)
         except Exception:  # noqa: BLE001
