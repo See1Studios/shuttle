@@ -159,7 +159,14 @@ def load(jid: str) -> Dict:
     p = job_dir(jid) / "job.json"
     if not p.exists():
         raise KeyError("no such shuttle job: %s" % jid)
-    return json.loads(p.read_text(encoding="utf-8"))
+    data = json.loads(p.read_text(encoding="utf-8"))
+    hb_file = job_dir(jid) / "heartbeat.json"
+    if hb_file.exists():
+        try:
+            data["heartbeat"] = json.loads(hb_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            pass
+    return data
 
 
 def save(job: Dict) -> Dict:
@@ -202,6 +209,8 @@ def summary(job: Dict) -> Dict:
         out["escalated"] = ["%s -> %s (round %s)" % (e["from"], e["to"], e["round"]) for e in job["escalations"]]
     if job.get("commit_error"):   # never only inside result(): a refused commit must show in status and wait
         out["commit_error"] = job["commit_error"].strip().splitlines()[-1][:300] + " (see shuttle_result)"
+    if job.get("heartbeat") and job.get("status") in ("running", "starting"):
+        out["heartbeat"] = job["heartbeat"]
     tried = [a for a in job.get("attempts", []) if a.get("round") == job.get("round") and a.get("outcome") in ("auth", "unavailable", "blocked", "stalled")]
     if tried:   # brains this round skipped past (quota / sign-in)
         out["fell_back_from"] = ["%s (%s until %s)" % (a["brain"], a["outcome"], a.get("rested_until", "?")) for a in tried]
@@ -505,6 +514,58 @@ def _watch_paths(b: Dict, cwd: Path, logs: List[Path]) -> List[Path]:
     return out
 
 
+def _get_latest_activity(b: Dict, d: Path, stem: str, cwd: Path) -> Tuple[str, int]:
+    changed = 0
+    try:
+        lines = git(cwd, "status", "--porcelain", check=False).splitlines()
+        changed = len([line for line in lines if not line.strip().startswith("?? .shuttle")])
+    except Exception:
+        pass
+
+    last_line = ""
+    for log_name in (f"stdout.{stem}.log", f"stderr.{stem}.log"):
+        log_path = d / log_name
+        if log_path.exists() and log_path.stat().st_size > 0:
+            try:
+                with open(log_path, "rb") as f:
+                    f.seek(max(0, log_path.stat().st_size - 4096))
+                    content = f.read().decode("utf-8", "replace").splitlines()
+                    for line in reversed(content):
+                        line_s = line.strip()
+                        if line_s:
+                            last_line = line_s
+                            break
+            except OSError:
+                pass
+        if last_line:
+            break
+
+    if b["cli"] == "agy" and (not last_line or "for shortcuts" in last_line):
+        home = Path(B.account_env("agy", b["account"]).get("HOME") or B.USER_HOME)
+        log_dir = home / ".gemini" / "antigravity-cli" / "log"
+        if log_dir.exists():
+            try:
+                agy_logs = sorted(log_dir.glob("cli-*.log"), key=lambda p: p.stat().st_mtime, reverse=True)[:3]
+                if agy_logs:
+                    with open(agy_logs[0], "rb") as f:
+                        f.seek(max(0, agy_logs[0].stat().st_size - 2048))
+                        content = f.read().decode("utf-8", "replace").splitlines()
+                        for line in reversed(content):
+                            line_s = line.strip()
+                            if line_s:
+                                if "URL:" in line_s:
+                                    last_line = "API 통신 중: " + line_s.split("URL:")[-1].split()[0]
+                                else:
+                                    last_line = line_s[-120:]
+                                break
+            except OSError:
+                pass
+
+    if not last_line:
+        last_line = "워커 에이전트 작업 준비 및 추론 중…"
+    return last_line, changed
+
+
 def _spawn(jid: str, argv: List[str], cwd: Path, b: Dict, stem: str, timeout: int) -> tuple:
     """Run one brain to its end. (exit code, error text). Stopped early when it makes no progress for
     `stall_sec` (error starts with "stalled")."""
@@ -522,15 +583,45 @@ def _spawn(jid: str, argv: List[str], cwd: Path, b: Dict, stem: str, timeout: in
         watch = _watch_paths(b, cwd, [d / ("stdout.%s.log" % stem), d / ("stderr.%s.log" % stem)])
         start = last_change = time.time()
         seen = _progress(watch)
+
+        def write_heartbeat(idle_sec: int):
+            last_line, changed_files = _get_latest_activity(b, d, stem, cwd)
+            hb = {
+                "at": round(time.time(), 1),
+                "agent_pid": p.pid,
+                "brain": B.label(b),
+                "elapsed_sec": round(time.time() - start, 1),
+                "active_sec_ago": idle_sec,
+                "state": "active" if idle_sec < 15 else "thinking" if idle_sec < 60 else "idle",
+                "stall_sec": stall,
+                "stall_in": max(0, stall - idle_sec) if stall else None,
+                "last_line": last_line[:200] if last_line else "",
+                "files_changed": changed_files,
+            }
+            try:
+                (d / "heartbeat.json").write_text(json.dumps(hb, ensure_ascii=False), encoding="utf-8")
+            except OSError:
+                pass
+
+        write_heartbeat(0)
         while True:
             try:
-                return p.wait(timeout=min(10, stall / 3 if stall else 10, max(1, timeout - (time.time() - start)))), ""
+                ret = p.wait(timeout=min(2, stall / 3 if stall else 2, max(1, timeout - (time.time() - start))))
+                try:
+                    (d / "heartbeat.json").unlink(missing_ok=True)
+                except OSError:
+                    pass
+                return ret, ""
             except subprocess.TimeoutExpired:
                 pass
             now_ = time.time()
             if now_ - start >= timeout:
                 kill_tree(p.pid)
                 p.wait(30)
+                try:
+                    (d / "heartbeat.json").unlink(missing_ok=True)
+                except OSError:
+                    pass
                 return -1, "timed out after %ss" % timeout
             cur = _progress(watch)
             if cur != seen:
@@ -538,7 +629,12 @@ def _spawn(jid: str, argv: List[str], cwd: Path, b: Dict, stem: str, timeout: in
             elif stall and now_ - last_change >= stall:
                 kill_tree(p.pid)
                 p.wait(30)
+                try:
+                    (d / "heartbeat.json").unlink(missing_ok=True)
+                except OSError:
+                    pass
                 return -1, "stalled: no output, file or log change for %ds" % int(now_ - last_change)
+            write_heartbeat(int(now_ - last_change))
 
 
 def run_check(job: Dict, command: str = "", timeout: int = 1800) -> Dict:
@@ -802,10 +898,19 @@ def result(jid: str, max_diff: int = RESULT_DIFF, paths: Optional[List[str]] = N
     wt = Path(job["worktree"])
     report = read(wt / BRIEF_DIR / "REPORT.md") if wt.exists() else ""
     res["stdout_tail"] = tail(out, 600 if report else TAIL)
-    if job.get("status") in ("failed", "lost"):
+    if job.get("status") in ("failed", "lost", "running", "starting"):
         err = read(d / ("stderr.%s.log" % stem)).strip()
         if err:
             res["stderr_tail"] = tail(err, 1500)
+    if job.get("status") in ("running", "starting") and not res["stdout_tail"] and job.get("cli") == "agy":
+        home = Path(B.account_env("agy", job.get("account", "default")).get("HOME") or B.USER_HOME)
+        log_dir = home / ".gemini" / "antigravity-cli" / "log"
+        if log_dir.exists():
+            agy_logs = sorted(log_dir.glob("cli-*.log"), key=lambda p: p.stat().st_mtime, reverse=True)[:1]
+            if agy_logs:
+                res["stdout_tail"] = "[agy CLI 실시간 로그]\n" + tail(read(agy_logs[0]), 2000)
+    if job.get("heartbeat"):
+        res["heartbeat"] = job["heartbeat"]
     if not wt.exists():
         return res
     res["report"] = report or "(the worker wrote no REPORT.md)"

@@ -95,5 +95,75 @@ class ExcludeExpensiveModels(unittest.TestCase):
         self.assertIn("gemini-3.8-flash", families)
 
 
+class HeartbeatAndLiveProgress(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="shuttle-hb-test-"))
+        import shuttle as D
+        self.D = D
+        self.saved_jobs = D.JOBS
+        D.JOBS = self.tmp / "jobs"
+        D.JOBS.mkdir(parents=True, exist_ok=True)
+
+    def tearDown(self):
+        self.D.JOBS = self.saved_jobs
+
+    def test_load_and_summary_surface_live_heartbeat(self):
+        jid = "test-live-hb"
+        d = self.D.job_dir(jid)
+        d.mkdir(parents=True, exist_ok=True)
+        job = {
+            "id": jid,
+            "status": "running",
+            "cli": "agy",
+            "model": "gemini-3.8-flash-high",
+            "title": "testing live progress",
+            "round": 1,
+        }
+        self.D.save(job)
+
+        # Before heartbeat file exists
+        loaded = self.D.load(jid)
+        self.assertNotIn("heartbeat", loaded)
+        summ = self.D.summary(loaded)
+        self.assertNotIn("heartbeat", summ)
+
+        # When heartbeat is recorded by runner
+        hb = {
+            "at": 1700000000.0,
+            "agent_pid": 12345,
+            "brain": "agy:gemini-3.8-flash-high@default",
+            "elapsed_sec": 12.3,
+            "active_sec_ago": 2,
+            "state": "active",
+            "stall_sec": 240,
+            "stall_in": 238,
+            "last_line": "running tests: 5 passed",
+            "files_changed": 3,
+        }
+        (d / "heartbeat.json").write_text(json.dumps(hb), encoding="utf-8")
+
+        loaded = self.D.load(jid)
+        self.assertIn("heartbeat", loaded)
+        self.assertEqual(loaded["heartbeat"]["state"], "active")
+        self.assertEqual(loaded["heartbeat"]["files_changed"], 3)
+
+        summ = self.D.summary(loaded)
+        self.assertIn("heartbeat", summ)
+        self.assertEqual(summ["heartbeat"]["stall_in"], 238)
+
+    def test_get_latest_activity_reads_log_and_git_changes(self):
+        jid = "test-act"
+        d = self.D.job_dir(jid)
+        d.mkdir(parents=True, exist_ok=True)
+        stem = "r1.a1"
+        (d / f"stdout.{stem}.log").write_text("Compiling code...\nAll checks passed successfully!\n", encoding="utf-8")
+        room = self.tmp / "worktree"
+        room.mkdir(parents=True, exist_ok=True)
+
+        last_line, changed = self.D._get_latest_activity({"cli": "opencode", "account": "default"}, d, stem, room)
+        self.assertEqual(last_line, "All checks passed successfully!")
+        self.assertEqual(changed, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

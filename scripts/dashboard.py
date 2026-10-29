@@ -732,6 +732,31 @@ tr.interactive-row {
 .pill.warn { background: var(--warn-bg); color: var(--warn); border: 1px solid var(--warn-border); }
 .pill.bad { background: var(--bad-bg); color: var(--bad); border: 1px solid var(--bad-border); }
 .pill.idle { background: var(--surface); color: var(--mute); border: 1px solid var(--line); }
+.pill.acc { background: var(--acc-bg); color: var(--acc); border: 1px solid var(--acc); }
+
+.pill.pulse .pill-dot {
+  animation: pulse-dot-anim 1.2s infinite ease-in-out;
+}
+@keyframes pulse-dot-anim {
+  0% { transform: scale(0.85); opacity: 0.5; }
+  50% { transform: scale(1.35); opacity: 1; }
+  100% { transform: scale(0.85); opacity: 0.5; }
+}
+
+.live-status-banner {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--ok);
+  border-radius: 8px;
+  padding: 12px 16px;
+  margin-bottom: 16px;
+}
+.live-status-banner.thinking {
+  border-left-color: var(--acc);
+}
+.live-status-banner.idle {
+  border-left-color: var(--warn);
+}
 
 .mono {
   font-family: var(--font-mono);
@@ -1440,6 +1465,8 @@ tr.interactive-row {
     <button class="ghost sm" onclick="closeDrawer()" style="font-size:16px;padding:4px 8px">✕</button>
   </div>
 
+  <div id="dLiveBanner" style="display:none;padding:12px 24px 0 24px"></div>
+
   <div class="drawer-tabs">
     <div class="drawer-tab active" onclick="switchDrawerTab('report')">워커 보고서</div>
     <div class="drawer-tab" onclick="switchDrawerTab('diff')">코드 변경 (Diff)</div>
@@ -2090,14 +2117,34 @@ function filterJobs() {
     const meta = STATUS_META[j.status] || { label: j.status, cls: "idle", icon: "·" };
     const live = j.status === "running" || j.status === "starting";
     let statusPill = `<span class="pill ${meta.cls}"><span class="pill-dot"></span>${meta.label}</span>`;
+    let liveSub = "";
     if (j.phase === "waiting_login") {
-      statusPill = '<span class="pill bad"><span class="pill-dot"></span>로그인 대기</span>';
+      statusPill = '<span class="pill bad pulse"><span class="pill-dot"></span>로그인 대기</span>';
+    } else if (live && j.heartbeat) {
+      const hb = j.heartbeat;
+      const ago = hb.active_sec_ago;
+      if (hb.state === "active") {
+        statusPill = `<span class="pill ok pulse" title="활동 감지: ${ago}초 전"><span class="pill-dot"></span>활동 중 (${ago}s 전)</span>`;
+      } else if (hb.state === "thinking") {
+        statusPill = `<span class="pill acc pulse" title="추론/생성 중: ${ago}초 전"><span class="pill-dot"></span>추론 중 (${ago}s 전)</span>`;
+      } else {
+        statusPill = `<span class="pill warn pulse" title="무반응: ${ago}초 전 (스톨 한도 ${hb.stall_sec}초)"><span class="pill-dot"></span>대기 중 (${ago}s 전)</span>`;
+      }
+      if (hb.last_line) {
+        liveSub = `<div class="mute" style="font-size:11px;margin-top:3px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(hb.last_line)}">⚡ ${esc(hb.last_line)}</div>`;
+      }
     }
 
     const elapsed = j.elapsed_sec ? formatDuration(j.elapsed_sec) : (live ? "진행 중" : "-");
     const started = (j.started || "").replace("T", " ").slice(5, 16);
 
+    const hbNotes = (live && j.heartbeat) ? [
+      j.heartbeat.files_changed ? `${j.heartbeat.files_changed}개 파일 수정 중` : "",
+      (j.heartbeat.stall_in !== undefined && j.heartbeat.stall_in !== null) ? `스톨 감지까지 ${j.heartbeat.stall_in}초` : ""
+    ].filter(Boolean).join(" · ") : "";
+
     const notes = [
+      hbNotes,
       j.error,
       j.check && ("체크: " + j.check),
       (j.needs_login || []).length ? "로그인 필요" : "",
@@ -2109,7 +2156,7 @@ function filterJobs() {
         <div style="font-weight:600;color:var(--fg)">${esc(j.title || "제목 없음")}</div>
         <div class="mono mute" style="font-size:11.5px">${esc(j.id)}</div>
       </td>
-      <td>${statusPill}</td>
+      <td>${statusPill}${liveSub}</td>
       <td class="mono">
         <b>${esc(j.cli)}</b>${j.model ? '<span class="mute">:' + esc(String(j.model).replace("opencode/", "")) + '</span>' : ''}
       </td>
@@ -2130,18 +2177,21 @@ function filterJobs() {
 }
 
 // Job Drawer
-async function openJobDrawer(jid) {
-  $("drawerBackdrop").className = "drawer-backdrop open";
-  $("jobDrawer").className = "drawer open";
+async function openJobDrawer(jid, isBackgroundUpdate = false) {
+  if (!isBackgroundUpdate) {
+    $("drawerBackdrop").className = "drawer-backdrop open";
+    $("jobDrawer").className = "drawer open";
 
-  $("dTitle").textContent = "불러오는 중…";
-  $("dId").textContent = jid;
-  $("dReport").textContent = "보고서 로딩 중…";
-  $("dDiffStat").textContent = "Diffstat 불러오는 중…";
-  $("dDiff").textContent = "변경사항 로딩 중…";
-  $("dLogs").textContent = "로그 로딩 중…";
-  $("dMetaBody").innerHTML = '<tr><td class="mute">불러오는 중…</td></tr>';
-  $("dFooter").innerHTML = "";
+    $("dTitle").textContent = "불러오는 중…";
+    $("dId").textContent = jid;
+    $("dReport").textContent = "보고서 로딩 중…";
+    $("dDiffStat").textContent = "Diffstat 불러오는 중…";
+    $("dDiff").textContent = "변경사항 로딩 중…";
+    $("dLogs").textContent = "로그 로딩 중…";
+    $("dMetaBody").innerHTML = '<tr><td class="mute">불러오는 중…</td></tr>';
+    $("dFooter").innerHTML = "";
+    $("dLiveBanner").style.display = "none";
+  }
 
   try {
     const job = await post("/api/job", { id: jid, max_diff: 100000 });
@@ -2149,6 +2199,34 @@ async function openJobDrawer(jid) {
 
     $("dTitle").textContent = job.title || "제목 없음";
     $("dId").textContent = `${job.id} (${job.cli}${job.model ? ' : ' + job.model : ''})`;
+
+    // Live Progress Banner
+    const live = job.status === "running" || job.status === "starting";
+    if (live && job.heartbeat) {
+      const hb = job.heartbeat;
+      const hbClass = hb.state === "active" ? "ok" : (hb.state === "thinking" ? "acc" : "warn");
+      const hbText = hb.state === "active" ? "정상 활동 중 (Active)" : (hb.state === "thinking" ? "추론 및 생성 중 (Thinking)" : "대기 중 (Idle)");
+      $("dLiveBanner").innerHTML = `
+        <div class="live-status-banner ${hb.state}">
+          <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
+            <div style="display:flex;align-items:center;gap:8px">
+              <span class="pill ${hbClass} pulse"><span class="pill-dot"></span>${hbText}</span>
+              <span style="font-size:12.5px;font-weight:600;color:var(--fg)">최근 활동 감지: ${hb.active_sec_ago}초 전</span>
+            </div>
+            ${(hb.stall_in !== undefined && hb.stall_in !== null) ? `<div class="mute" style="font-size:12px">스톨 방지 감지: <b>${hb.stall_in}초 남음</b> (한도 ${hb.stall_sec}초)</div>` : ''}
+          </div>
+          <div style="margin-top:8px;font-size:12px;display:flex;gap:16px;flex-wrap:wrap" class="mute">
+            <div>수정 중인 파일: <b style="color:var(--fg)">${hb.files_changed || 0}개</b></div>
+            <div>에이전트 경과 시간: <b style="color:var(--fg)">${formatDuration(hb.elapsed_sec || job.elapsed_sec)}</b></div>
+            <div>워커 프로세스 PID: <span class="mono">${job.agent_pid || '-'}</span></div>
+          </div>
+          ${hb.last_line ? `<div style="margin-top:8px;padding:6px 10px;border-radius:4px;background:var(--card);font-size:12px;font-family:var(--font-mono);color:var(--fg);border:1px solid var(--line);word-break:break-all">최근 감지 로그: ${esc(hb.last_line)}</div>` : ''}
+        </div>
+      `;
+      $("dLiveBanner").style.display = "block";
+    } else {
+      $("dLiveBanner").style.display = "none";
+    }
 
     // Report
     $("dReport").textContent = job.report || "(작업자가 작성한 REPORT.md가 없습니다)";
@@ -2371,6 +2449,14 @@ async function load() {
     const data = await res.json();
     if (!res.ok) throw data;
     render(data);
+
+    // If job drawer is open and viewing an active job, refresh the drawer in background
+    if ($("jobDrawer").classList.contains("open") && currentJobDetail) {
+      const curJob = (data.jobs || []).find(j => j.id === currentJobDetail.id);
+      if (curJob && (curJob.status === "running" || curJob.status === "starting")) {
+        openJobDrawer(curJob.id, true);
+      }
+    }
   } catch (err) {
     toast("상태 동기화 실패: " + (err.error || err.message || err), true);
   }

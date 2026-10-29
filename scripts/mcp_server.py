@@ -187,7 +187,10 @@ def shuttle_wait(ids: List[str], timeout_sec: int = 300, any_finished: bool = Fa
 
 @_TOOL
 def shuttle_status(id: str) -> dict:
-    """One job's state: running | done | failed | lost | cancelled | merged | discarded."""
+    """One job's state: running | done | failed | lost | cancelled | merged | discarded.
+    For running jobs, includes live `heartbeat` diagnostics: state (active | thinking | idle),
+    seconds since last activity (active_sec_ago), latest stdout/stderr/CLI line (last_line),
+    number of modified files (files_changed), and seconds remaining until stall timeout (stall_in)."""
     return d.status(id)
 
 
