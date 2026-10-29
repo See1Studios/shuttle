@@ -69,6 +69,47 @@ def act(path: str, body: dict) -> object:
         res = d.login(body["cli"], body.get("account") or "default")
         threading.Timer(1.0, _refresh_auth).start()
         return res
+    if path == "/api/auto-login":
+        cli = body.get("cli", "agy")
+        account = body.get("account") or "default"
+        res = d.login(cli, account)
+        st = S.read_state(cli, account)
+        url = st.get("url")
+        if url:
+            try:
+                import auto_login
+                auto_login.start_auto_login(cli, account, url)
+            except Exception:
+                pass
+        threading.Timer(1.0, _refresh_auth).start()
+        return {"ok": True, "res": res}
+    if path == "/api/account/add":
+        cli = body.get("cli", "agy")
+        account = (body.get("account") or "").strip()
+        B.add_account(cli, account)
+        if body.get("login"):
+            d.login(cli, account)
+            st = S.read_state(cli, account)
+            url = st.get("url")
+            if url:
+                try:
+                    import auto_login
+                    auto_login.start_auto_login(cli, account, url)
+                except Exception:
+                    pass
+        threading.Timer(1.0, _refresh_auth).start()
+        return {"ok": True, "cli": cli, "account": account}
+    if path == "/api/account/delete":
+        cli = body.get("cli", "")
+        account = (body.get("account") or "").strip()
+        if account in ("", "default"):
+            raise ValueError("기본 계정(default)은 삭제할 수 없습니다.")
+        p = B.account_dir(cli, account)
+        if p and p.exists():
+            import shutil
+            shutil.rmtree(p)
+        threading.Timer(1.0, _refresh_auth).start()
+        return {"ok": True}
     if path == "/api/signin-code":
         res = S.submit_code(body["cli"], body.get("account") or "default", body.get("code", ""))
         threading.Timer(8.0, _refresh_auth).start()
@@ -1228,9 +1269,10 @@ tr.interactive-row {
     <!-- Worker Login -->
     <section>
       <div class="section-head">
-        <h2>워커 인증 현황 <span class="badge-count" id="authCount">0</span></h2>
+        <h2>워커 인증 및 다중 계정 <span class="badge-count" id="authCount">0</span></h2>
         <div style="display:flex;align-items:center;gap:8px">
           <span class="mute" id="authAt" style="font-size:12px"></span>
+          <button class="sm primary" onclick="openAddAccountModal()">+ 계정 추가</button>
           <button class="sm" id="btnReauth" onclick="triggerAuthCheck()">다시 확인</button>
         </div>
       </div>
@@ -1485,6 +1527,37 @@ tr.interactive-row {
   </div>
 </div>
 
+<!-- Add Account Modal -->
+<div class="modal-backdrop" id="addAccountBackdrop" onclick="closeAddAccountModal()" style="display:none"></div>
+<div class="modal" id="addAccountModal" style="display:none">
+  <div class="modal-head">
+    <h3 style="margin:0;font-size:16px">새 워커 계정 등록 ➕</h3>
+    <button class="ghost sm" onclick="closeAddAccountModal()" style="font-size:16px;padding:2px 6px">✕</button>
+  </div>
+  <div class="modal-body">
+    <div style="margin-bottom:14px">
+      <label class="form-label">대상 CLI <span style="color:var(--bad)">*</span></label>
+      <select id="accCli" class="form-select">
+        <option value="agy">agy (Google Antigravity CLI)</option>
+        <option value="codex">codex (OpenAI Codex CLI)</option>
+        <option value="claude">claude (Anthropic Claude Code)</option>
+        <option value="grok">grok (xAI Grok CLI)</option>
+      </select>
+    </div>
+    <div style="margin-bottom:14px">
+      <label class="form-label">계정 식별 이름 (영문/숫자/._-) <span style="color:var(--bad)">*</span></label>
+      <input type="text" id="accName" class="form-input" placeholder="예: work, acc2, sub1" autocomplete="off">
+      <div class="mute" style="font-size:11.5px;margin-top:4px">
+        원하는 만큼 여러 계정을 등록할 수 있습니다. 한 계정의 할당량(Quota)이 소진되면 자동으로 다음 계정으로 전환되어 작업을 이어갑니다.
+      </div>
+    </div>
+  </div>
+  <div class="modal-footer">
+    <button onclick="closeAddAccountModal()">취소</button>
+    <button class="primary" id="btnAddAccount" onclick="submitAddAccount()">⚡ 계정 등록 및 원클릭 로그인</button>
+  </div>
+</div>
+
 <div id="toast"></div>
 
 <script>
@@ -1616,6 +1689,67 @@ async function login(cli, account) {
     }
     setTimeout(() => { post("/api/auth", {}).then(load); }, 15000);
   } catch (e) {}
+}
+
+async function autoLogin(cli, account) {
+  try {
+    toast(`⚡ ${cli}@${account} 원클릭 자동 로그인을 시작합니다…`);
+    await post("/api/auto-login", { cli, account });
+    toast("브라우저가 열렸습니다. Google 계정을 선택하시면 인증 코드가 자동 감지됩니다.");
+    setTimeout(() => { post("/api/auth", {}).then(load); }, 12000);
+  } catch (err) {
+    toast("원클릭 로그인 실패: " + (err.error || err.message || err), true);
+  }
+}
+
+function openAddAccountModal() {
+  $("addAccountBackdrop").style.display = "block";
+  $("addAccountModal").style.display = "flex";
+  $("accName").value = "";
+  $("accName").focus();
+}
+
+function closeAddAccountModal() {
+  $("addAccountBackdrop").style.display = "none";
+  $("addAccountModal").style.display = "none";
+}
+
+async function submitAddAccount() {
+  const cli = $("accCli").value;
+  const account = ($("accName").value || "").trim();
+  if (!account) {
+    toast("계정 식별 이름을 입력해 주세요 (예: work, acc2)", true);
+    $("accName").focus();
+    return;
+  }
+  const btn = $("btnAddAccount");
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> 등록 및 로그인 중…';
+  try {
+    await post("/api/account/add", { cli, account, login: true });
+    toast(`계정 '${account}'이 등록되었습니다! 로그인을 진행합니다.`);
+    closeAddAccountModal();
+    if (cli === "agy") {
+      await autoLogin(cli, account);
+    }
+    await load();
+  } catch (err) {
+    toast("계정 등록 실패: " + (err.error || err.message || err), true);
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = "⚡ 계정 등록 및 원클릭 로그인";
+  }
+}
+
+async function deleteAccount(cli, account) {
+  if (!confirm(`${cli} 계정 '${account}'을 정말 삭제하시겠습니까?`)) return;
+  try {
+    await post("/api/account/delete", { cli, account });
+    toast(`계정 '${account}'이 삭제되었습니다.`);
+    await load();
+  } catch (err) {
+    toast("계정 삭제 실패: " + (err.error || err.message || err), true);
+  }
 }
 
 async function sendCode(cli, account, inputId) {
@@ -1754,18 +1888,36 @@ function renderAuth(s) {
     const signin = (s.signin || {})[signinKey] || {};
     let actionBtn = "";
     if (r.logged_in === false) {
-      actionBtn = `<button class="primary sm" onclick="login('${esc(r.cli)}','${esc(r.account)}')">로그인</button>`;
+      if (r.cli === "agy") {
+        actionBtn = `
+          <button class="primary sm" style="background:#2563eb" onclick="autoLogin('${esc(r.cli)}','${esc(r.account)}')">⚡ 원클릭 로그인</button>
+          <button class="sm ghost" onclick="login('${esc(r.cli)}','${esc(r.account)}')">콘솔</button>
+        `;
+      } else {
+        actionBtn = `<button class="primary sm" onclick="login('${esc(r.cli)}','${esc(r.account)}')">로그인</button>`;
+      }
+    }
+    if (r.account !== "default") {
+      actionBtn += ` <button class="sm ghost" style="color:var(--bad)" onclick="deleteAccount('${esc(r.cli)}','${esc(r.account)}')">삭제</button>`;
     }
     let directLink = "";
     if (signin.state === "awaiting_browser" && signin.url) {
       const codeId = `code-${esc(r.cli)}-${esc(r.account)}`;
-      directLink = `<div style="margin-top:4px"><a href="${esc(signin.url)}" target="_blank" rel="noopener" style="font-size:12px;color:var(--acc);text-decoration:none">↗ 브라우저 로그인 열기</a></div>
-        <div style="margin-top:6px;display:flex;gap:6px;align-items:center">
-          <input id="${codeId}" type="password" autocomplete="off" placeholder="로그인 후 페이지에 나온 코드" style="font-size:12px;flex:1;min-width:0">
-          <button class="primary sm" onclick="sendCode('${esc(r.cli)}','${esc(r.account)}','${codeId}')">코드 입력</button>
-        </div>${signin.error ? `<div class="mute" style="font-size:12px;margin-top:4px">${esc(signin.error)}</div>` : ""}`;
+      directLink = `
+        <div style="margin-top:6px;padding:8px;border-radius:6px;background:var(--surface);border:1px solid var(--line)">
+          <div style="display:flex;align-items:center;gap:6px;font-weight:600;color:var(--acc);font-size:12px">
+            <span class="spinner" style="width:12px;height:12px;border-width:1.5px"></span>
+            브라우저에서 로그인하면 코드를 자동으로 감지합니다
+          </div>
+          <div style="margin-top:4px"><a href="${esc(signin.url)}" target="_blank" rel="noopener" style="font-size:11.5px;color:var(--acc);text-decoration:none">↗ 브라우저 수동 열기</a></div>
+          <div style="margin-top:6px;display:flex;gap:6px;align-items:center">
+            <input id="${codeId}" type="password" autocomplete="off" placeholder="자동 감지 실패 시 수동 코드 붙여넣기" style="font-size:11.5px;flex:1;min-width:0">
+            <button class="sm" onclick="sendCode('${esc(r.cli)}','${esc(r.account)}','${codeId}')">제출</button>
+          </div>
+          ${signin.error ? `<div class="mute" style="font-size:11.5px;color:var(--bad);margin-top:4px">${esc(signin.error)}</div>` : ""}
+        </div>`;
     } else if (signin.state === "code_sent") {
-      directLink = `<div class="mute" style="font-size:12px;margin-top:4px">코드를 넘겼습니다. 확인 중…</div>`;
+      directLink = `<div class="mute" style="font-size:12px;margin-top:4px">⚡ 코드를 수신하여 제출했습니다. 검증 중…</div>`;
     }
 
     return `<tr>
@@ -2228,6 +2380,7 @@ async function load() {
 window.addEventListener("keydown", e => {
   if (e.key === "Escape") {
     closeNewTaskModal();
+    closeAddAccountModal();
     closeDrawer();
   }
 });

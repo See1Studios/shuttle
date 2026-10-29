@@ -122,6 +122,8 @@ DEFAULTS = {
                       "command(choco)", "command(format)", "command(shutdown)", "command(reg)", "command(setx)"],
     # Paths a worker's tools write that must never be committed (added to the repo's .git/info/exclude).
     "exclude": ["/.shuttle/", "graft/.cache/", "graft/.graph/"],
+    # High-cost models to exclude from automatic routing, ladders, and default chains
+    "exclude_models": ["argon", "opus"],
 }
 
 UNAVAILABLE_RE = re.compile(r"quota|rate.?limit|usage limit|session limit|limit reached|resets? (at|in)|\b429\b|"
@@ -535,13 +537,18 @@ def _version(base: str) -> Tuple[int, ...]:
     return tuple(int(n) for n in re.findall(r"\d+", base))
 
 
-def agy_ladder(models: Optional[List[str]] = None) -> List[Dict]:
+def agy_ladder(models: Optional[List[str]] = None, exclude: Optional[List[str]] = None) -> List[Dict]:
     """agy's model families, smartest first by `agy_rank`, with the efforts each has. Per rank entry only the
     newest version is ranked; older versions and families matching no entry follow with rank None."""
-    rank = [r.lower() for r in config().get("agy_rank") or []]
+    cfg = config()
+    if exclude is None:
+        exclude = [x.lower() for x in (cfg.get("exclude_models") or [])]
+    rank = [r.lower() for r in cfg.get("agy_rank") or []]
     fams: Dict[str, List[str]] = {}
     for m in models if models is not None else agy_models():
         base, eff = split_effort(m)
+        if exclude and any(x in base.lower() for x in exclude):
+            continue
         fams.setdefault(base, [])
         if eff and eff not in fams[base]:
             fams[base].append(eff)
@@ -612,6 +619,9 @@ def chain_for(cli: str, model: str = "", fallback: bool = True, installed=None, 
         models = [model] if (i == 0 and model) else (cfg["models"].get(c) or (
             [parse(t)["model"] for t in tiers()[difficulty or cfg.get("default_difficulty") or "normal"]
              if t.startswith("agy:")] if c == "agy" else [""]))
+        exclude = [x.lower() for x in (cfg.get("exclude_models") or [])]
+        if exclude:
+            models = [m for m in models if not (m and any(x in m.lower() for x in exclude))]
         accts = accounts(c)
         pairs = ([(m, a) for m in models for a in accts] if cfg.get("order") != "account-first"
                  else [(m, a) for a in accts for m in models])
@@ -626,10 +636,13 @@ def tier_chain(difficulty: str, installed=None) -> List[Dict]:
     if difficulty not in all_tiers:
         raise ValueError("difficulty must be one of %s" % ", ".join(all_tiers))
     off = set(cfg.get("disabled") or [])
+    exclude = [x.lower() for x in (cfg.get("exclude_models") or [])]
     out: List[Dict] = []
     for spec in all_tiers[difficulty]:
         b = parse(spec)
         if b["cli"] in off or (installed and not installed(b["cli"])):
+            continue
+        if b["model"] and exclude and any(x in b["model"].lower() for x in exclude):
             continue
         accts = [b["account"]] if "@" in spec else accounts(b["cli"])
         out += [{"cli": b["cli"], "model": b["model"], "account": a} for a in accts]

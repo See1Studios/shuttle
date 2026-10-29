@@ -61,25 +61,69 @@ def shuttle_compete(clis: List[str], task: str, repo: str, title: str = "", base
 def shuttle_auth(cli: str = "", open_login: bool = True) -> list:
     """Sign-in state of every account of every installed CLI (or one CLI). Each one not signed in gets its own
     sign-in window opened on this machine (open_login; claude only when named) and carries the `login` command:
-    tell the operator to finish it there. opencode needs no sign-in (free built-in models). Jobs open the window
-    themselves when a worker turns out signed out, and wait for the sign-in when nothing else in the chain can work."""
+    tell the operator to finish it there. opencode needs no sign-in (free built-in models).
+    For agy, Google OAuth displays a response code in the browser: the operator can paste it into the dashboard at
+    http://127.0.0.1:8790/ or give it to you to pass to shuttle_agy_code(code). Jobs open the window themselves
+    when a worker turns out signed out, and wait for the sign-in when nothing else in the chain can work."""
     return d.auth(cli, open_login)
 
 
 @_TOOL
 def shuttle_dashboard(open_browser: bool = True) -> dict:
-    """Open the local management dashboard on this machine (starts it if needed): sign-in state with a button that
-    opens each CLI's sign-in window, resting quota groups (clear them), opencode's free models, the difficulty
-    chains, and the jobs (cancel / discard). Give the operator the returned url."""
+    """Open the local Shuttle management dashboard at http://127.0.0.1:8790/ (starts it if needed).
+    The dashboard is a full mission control web UI: live job tracking, interactive slide-over drawer with
+    colorized diffs, report and stdout/stderr logs, direct 'Merge to main' and 'Followup' buttons, test re-check,
+    new task launcher modal, worker sign-ins with Google OAuth response code input, resting quota clearing,
+    and model ratings leaderboard. Give the operator the returned url."""
     return d.dashboard(open_browser=open_browser)
 
 
 @_TOOL
 def shuttle_login(cli: str, account: str = "default") -> dict:
-    """Open the CLI's own interactive sign-in in a new console window on this machine, for `account` (a new
-    account directory is created for a non-default name, so several logins of one CLI can work in turn). The
-    operator completes it (browser / device code); you never type credentials. Ask the operator before calling."""
+    """Open the CLI's own interactive sign-in in a new console window or browser on this machine, for `account` (a
+    new account directory is created for a non-default name, so several logins of one CLI can work in turn).
+    For agy, one-click auto login automatically captures and submits the code via browser CDP/clipboard.
+    The operator can also paste the response code into the dashboard at http://127.0.0.1:8790/ or pass it to shuttle_agy_code(code).
+    Ask the operator before calling."""
     return d.login(cli, account)
+
+
+@_TOOL
+def shuttle_auto_login(cli: str = "agy", account: str = "default") -> dict:
+    """Trigger one-click auto login for `cli` (e.g. agy): automatically launches Edge/Chrome with remote debugging
+    (CDP) enabled and monitors active tabs and clipboard for Google OAuth authorization code. Once logged in on Google's
+    page, the code is automatically captured and submitted, and the OAuth tab closes automatically."""
+    res = d.login(cli, account)
+    import signin as S
+    st = S.read_state(cli, account)
+    url = st.get("url")
+    if url:
+        try:
+            import auto_login
+            auto_login.start_auto_login(cli, account, url)
+        except Exception:
+            pass
+    return {"ok": True, "cli": cli, "account": account, "res": res}
+
+
+@_TOOL
+def shuttle_account_add(cli: str, account: str, auto_login: bool = True) -> dict:
+    """Register a new named account for `cli` (e.g. agy account 'work' or 'acc2') so that when quota on one account
+    is exhausted, tasks automatically fall back to the next account. When auto_login=True, immediately launches
+    one-click auto-login."""
+    d.B.add_account(cli, account)
+    if auto_login:
+        d.login(cli, account)
+        import signin as S
+        st = S.read_state(cli, account)
+        url = st.get("url")
+        if url:
+            try:
+                import auto_login as AL
+                AL.start_auto_login(cli, account, url)
+            except Exception:
+                pass
+    return {"ok": True, "cli": cli, "account": account}
 
 
 @_TOOL
@@ -97,8 +141,15 @@ def shuttle_agy_switch(confirm_logout: bool = False) -> dict:
 
 @_TOOL
 def shuttle_agy_code(code: str) -> dict:
-    """Finish shuttle_agy_switch: type the response code the operator copied from the Google sign-in page into
-    agy. Returns the signed-in email. The code is used once and never stored."""
+    """Submit the Google OAuth response code to complete agy's sign-in (or agy account switch). Type the code
+    the operator copied from the Google sign-in page into agy. Returns the signed-in email. The code is used once
+    and never stored."""
+    import signin as S
+    # Also notify running signin background workers if any
+    try:
+        S.submit_code("agy", "default", code)
+    except Exception:
+        pass
     import agy_login
     return agy_login.finish(code)
 

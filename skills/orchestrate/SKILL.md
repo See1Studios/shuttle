@@ -70,14 +70,16 @@ the check at it. `auto_fix_rounds` (default 2) is per worker before it escalates
 
 - `shuttle_start(task, repo, difficulty=..., check=..., title=...)`; one call per parallel piece.
   `shuttle_compete` only when the choice really matters: it doubles what you review.
-- One line to the operator with the job ids and the `dashboard` link from the start result (the job brings the
-  dashboard up itself; in desktop apps with a browser pane you can also open that link beside the chat),
-  then `shuttle_wait(ids, timeout_sec=600)` (compact states). Don't
-  poll `shuttle_status` in between; don't narrate waits.
+- One line to the operator with the job ids and the `dashboard` link (`http://127.0.0.1:8790/`) from the start
+  result (the job brings the dashboard up itself; the dashboard lets the operator inspect colorized diffs, logs,
+  or click "Merge to main" / "Followup" directly; see `references/dashboard-guide.md`), then
+  `shuttle_wait(ids, timeout_sec=600)` (compact states). Don't poll `shuttle_status` in between; don't narrate waits.
 - Once per session before the first job, or when a job reports `needs_login` / `phase: waiting_login`:
   `shuttle_auth()` — it opens the sign-in window of each worker missing one; tell the operator to finish it there
-  (the waiting job carries on by itself). `shuttle_dashboard()` when they want to see and manage it all. See
-  `references/auth-and-fallback.md`. opencode needs no sign-in: never ask the operator to log it in.
+  (the waiting job carries on by itself). For `agy`, the operator signs in via Google OAuth and pastes the response
+  code into the dashboard at `http://127.0.0.1:8790/` or into chat (submit with `shuttle_agy_code(code)`).
+  `shuttle_dashboard()` when they want to see and manage it all. See `references/auth-and-fallback.md`.
+  opencode needs no sign-in: never ask the operator to log it in.
 - A `warnings` entry about the main working tree changing while a worker ran means a possible escaped write:
   look at the operator's `git status` before anything else and tell them.
 

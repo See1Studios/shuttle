@@ -118,7 +118,14 @@ def agy(account: str) -> int:
             if m and not url:
                 url = m.group(0).rstrip(").,;]'\"")
                 _write("agy", account, state="awaiting_browser", url=url)
-                webbrowser.open(url)
+                launched = False
+                try:
+                    import auto_login
+                    launched = auto_login.start_auto_login("agy", account, url)
+                except Exception:
+                    pass
+                if not launched:
+                    webbrowser.open(url)
             code = _take_code("agy", account) if url else ""
             if code:
                 proc.write(code + "\r")

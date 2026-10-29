@@ -30,15 +30,22 @@ the old account's rests are remembered for when it comes back.
 | claude | `claude auth login` | spends Claude quota; never automatic |
 | codex, grok | — | disabled (no subscription); implemented, enable in `brains.json` |
 
-## Checking sign-in
+## Checking sign-in and using the dashboard
 
 1. `shuttle_auth()` — every enabled CLI and account with `logged_in`; each one missing gets its sign-in window
    opened on this machine (`login_window` in the row; claude only when named). Tell the operator to finish it there.
-   You never type or see credentials. `shuttle_dashboard()` gives them a page with the same state and a login
-   button per CLI.
-2. Jobs do this by themselves: a worker found signed out opens its sign-in window, the next brain takes over, and
-   when none is left the job waits for the sign-in and carries on.
-3. Extra accounts (more quota) for claude / codex / grok / opencode: `shuttle_login(cli, "<name>")` creates
+   You never type or see credentials. `shuttle_dashboard()` gives them a local management page at
+   **`http://127.0.0.1:8790/`** with live state, one-click login buttons, Google response code submission,
+   limit clears, diff/report viewers, and new task launcher. See `references/dashboard-guide.md`.
+2. **agy Google Response Code & One-Click Auto Login**: When agy launches its sign-in, the browser displays a Google consent page:
+   - **Option 1 (Automatic / Recommended)**: Shuttle launches Edge/Chrome with remote debugging (CDP) enabled (`shuttle_auto_login` or dashboard "⚡ 원클릭 로그인"). As soon as the user selects their account in the browser, Shuttle automatically detects the OAuth response code from the browser tab URL or clipboard, submits it to agy, and closes the tab. Zero manual typing or copying required!
+   - **Option 2 (Dashboard Manual Submission)**: If the operator visits the URL in another browser, they can paste the response code into the input box next to the agy account in the dashboard (`http://127.0.0.1:8790/`) and click "제출".
+   - **Option 3 (Chat Submission)**: Paste it in chat, where the host agent calls `shuttle_agy_code(code)` or `signin.submit_code("agy", account, code)`.
+   The code is consumed immediately and never stored.
+   - **Exclusion of High-Cost Models**: Models like Gemini Argon and Claude Opus are excluded from auto-routing and tier chains (`exclude_models: ["argon", "opus"]`) to safeguard against high token costs.
+3. Jobs do this by themselves: a worker found signed out opens its sign-in window, the next brain takes over, and
+   when none is left the job waits for the sign-in (`phase: waiting_login`) and carries on.
+4. Extra accounts (more quota) for claude / codex / grok / opencode: `shuttle_login(cli, "<name>")` creates
    `~/.shuttle/accounts/<cli>/<name>/` and points the CLI there (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`,
    `GROK_HOME`, `XDG_DATA_HOME`). The account joins that CLI's chains. `env.json` there may hold an API key; it is
    the operator's secret — never read it out.

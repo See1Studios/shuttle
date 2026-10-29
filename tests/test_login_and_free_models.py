@@ -108,14 +108,22 @@ LIVE = ["gemini-4-argon-medium", "gemini-4-argon-high", "gemini-4-argon-low", "g
 
 class AgyLadder(Base):
     def test_families_smartest_first_newest_version_ranked(self):
-        rows = B.agy_ladder(LIVE)
+        rows = B.agy_ladder(LIVE, exclude=[])
         self.assertEqual([r["family"] for r in rows if r["rank"] is not None],
                          ["gemini-4-argon", "claude-opus-5-5", "claude-sonnet-5-5", "gemini-3.8-flash"])
         older = [r for r in rows if r.get("older")]
         self.assertEqual([r["family"] for r in older], ["gemini-2.5-flash"])
 
+    def test_exclude_models_filters_argon_and_opus(self):
+        rows = B.agy_ladder(LIVE)
+        self.assertEqual([r["family"] for r in rows if r["rank"] is not None],
+                         ["claude-sonnet-5-5", "gemini-3.8-flash"])
+        hard = B.auto_tier("hard", rows)
+        self.assertNotIn("argon", " ".join(hard))
+        self.assertNotIn("opus", " ".join(hard))
+
     def test_tiers_pick_model_and_effort_by_difficulty(self):
-        lad = B.agy_ladder(LIVE)
+        lad = B.agy_ladder(LIVE, exclude=[])
         self.assertEqual(B.auto_tier("hard", lad), ["agy:gemini-4-argon-high", "agy:claude-opus-5-5-high",
                                                    "agy:claude-sonnet-5-5-high", "agy:gemini-3.8-flash-high"])
         self.assertEqual(B.auto_tier("easy", lad), ["opencode", "agy:gemini-3.8-flash-low",
@@ -125,7 +133,7 @@ class AgyLadder(Base):
                                                      "agy:gemini-4-argon-medium"])
 
     def test_a_new_model_is_picked_up_without_config(self):
-        lad = B.agy_ladder(LIVE + ["gemini-5-argon-high", "gemini-5-argon-low"])
+        lad = B.agy_ladder(LIVE + ["gemini-5-argon-high", "gemini-5-argon-low"], exclude=[])
         self.assertEqual(B.auto_tier("hard", lad)[0], "agy:gemini-5-argon-high")
         self.assertEqual(B.agy_model(lad[0], "medium"), "gemini-5-argon-high")   # nearest effort it has
 
@@ -136,7 +144,7 @@ class AgyLadder(Base):
         self.assertEqual(g("claude-opus-5-5-high"), "agy@x#claude-gpt")
 
     def test_brains_json_tier_still_wins(self):
-        B.CONFIG.write_text(json.dumps({"tiers": {"hard": ["agy:claude-opus-5-5-high"]}}), encoding="utf-8")
+        B.CONFIG.write_text(json.dumps({"tiers": {"hard": ["agy:claude-opus-5-5-high"]}, "exclude_models": []}), encoding="utf-8")
         B.AGY_MODELS.write_text(json.dumps({"at": time.time(), "models": LIVE}), encoding="utf-8")
         t = B.tiers()
         self.assertEqual(t["hard"], ["agy:claude-opus-5-5-high"])
